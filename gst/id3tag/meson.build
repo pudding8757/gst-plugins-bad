@@ -1,6 +1,5 @@
 id3_sources = [
   'gstid3mux.c',
-  'id3tag.c',
 ]
 
 gstid3tag = library('gstid3tag',

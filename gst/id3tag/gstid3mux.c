@@ -192,7 +192,7 @@ gst_id3_mux_render_v2_tag (GstTagMux * mux, const GstTagList * taglist)
   GstId3Mux *id3mux = GST_ID3_MUX (mux);
 
   if (id3mux->write_v2)
-    return id3_mux_render_v2_tag (mux, taglist, id3mux->v2_major_version);
+    return gst_tag_list_to_id3v2_tag (taglist, id3mux->v2_major_version);
   else
     return NULL;
 }
@@ -203,7 +203,7 @@ gst_id3_mux_render_v1_tag (GstTagMux * mux, const GstTagList * taglist)
   GstId3Mux *id3mux = GST_ID3_MUX (mux);
 
   if (id3mux->write_v1)
-    return id3_mux_render_v1_tag (mux, taglist);
+    return gst_tag_list_to_id3v1_tag (taglist);
   else
     return NULL;
 }

@@ -931,14 +931,12 @@ gst_adaptive_demux_prepare_stream (GstAdaptiveDemux * demux,
     GstAdaptiveDemuxStream * stream)
 {
   GstPad *pad = stream->pad;
-  gchar *name = gst_pad_get_name (pad);
   GstEvent *event;
-  gchar *stream_id;
+  GstStream *stream_obj = stream->stream_object;
+  const gchar *stream_id = gst_stream_get_stream_id (stream_obj);
 
   gst_pad_set_active (pad, TRUE);
   stream->need_header = TRUE;
-
-  stream_id = gst_pad_create_stream_id (pad, GST_ELEMENT_CAST (demux), name);
 
   event =
       gst_pad_get_sticky_event (GST_ADAPTIVE_DEMUX_SINK_PAD (demux),
@@ -954,12 +952,14 @@ gst_adaptive_demux_prepare_stream (GstAdaptiveDemux * demux,
     demux->group_id = gst_util_group_id_next ();
   }
   event = gst_event_new_stream_start (stream_id);
+
+  gst_event_set_stream (event, stream_obj);
+  gst_event_set_stream_flags (event, gst_stream_get_stream_flags (stream_obj));
+
   if (demux->have_group_id)
     gst_event_set_group_id (event, demux->group_id);
 
   gst_pad_push_event (pad, event);
-  g_free (stream_id);
-  g_free (name);
 
   GST_DEBUG_OBJECT (demux, "Preparing srcpad %s:%s", GST_DEBUG_PAD_NAME (pad));
 
@@ -975,13 +975,12 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
   gboolean ret;
   GstPad *pad = stream->pad;
   GstCaps *caps;
+  GstStream *stream_obj = stream->stream_object;
 
+  caps = gst_stream_get_caps (stream_obj);
   if (stream->pending_caps) {
-    gst_pad_set_caps (pad, stream->pending_caps);
-    caps = stream->pending_caps;
-    stream->pending_caps = NULL;
-  } else {
-    caps = gst_pad_get_current_caps (pad);
+    gst_pad_set_caps (pad, caps);
+    stream->pending_caps = FALSE;
   }
 
   GST_DEBUG_OBJECT (demux, "Exposing srcpad %s:%s with caps %" GST_PTR_FORMAT,
@@ -1299,6 +1298,7 @@ GstAdaptiveDemuxStream *
 gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
 {
   GstAdaptiveDemuxStream *stream;
+  gchar *stream_id;
 
   stream = g_malloc0 (demux->stream_struct_size);
 
@@ -1329,6 +1329,12 @@ gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
   gst_segment_init (&stream->segment, GST_FORMAT_TIME);
   g_cond_init (&stream->fragment_download_cond);
   g_mutex_init (&stream->fragment_download_lock);
+
+  stream_id = gst_pad_create_stream_id (pad,
+      GST_ELEMENT_CAST (demux), GST_PAD_NAME (stream->pad));
+  stream->stream_object = gst_stream_new (stream_id, NULL,
+      GST_STREAM_TYPE_UNKNOWN, GST_STREAM_FLAG_NONE);
+  g_free (stream_id);
 
   demux->next_streams = g_list_append (demux->next_streams, stream);
 
@@ -1434,10 +1440,9 @@ gst_adaptive_demux_stream_free (GstAdaptiveDemuxStream * stream)
     gst_object_unref (stream->pad);
     stream->pad = NULL;
   }
-  if (stream->pending_caps)
-    gst_caps_unref (stream->pending_caps);
 
-  g_clear_pointer (&stream->pending_tags, gst_tag_list_unref);
+  if (stream->stream_object)
+    gst_object_unref (stream->stream_object);
 
   g_free (stream);
 }
@@ -2172,28 +2177,79 @@ gst_adaptive_demux_push_src_event (GstAdaptiveDemux * demux, GstEvent * event)
   return ret;
 }
 
-/* must be called with manifest_lock taken */
+/**
+ * gst_adaptive_demux_stream_set_caps:
+ * @stream: #GstAdaptiveDemuxStream
+ * @caps: (transfer full) (allow-none): #GstCaps
+ *
+ * Set the caps for the stream
+ * must be called with manifest_lock taken
+ */
 void
 gst_adaptive_demux_stream_set_caps (GstAdaptiveDemuxStream * stream,
     GstCaps * caps)
 {
   GST_DEBUG_OBJECT (stream->pad, "setting new caps for stream %" GST_PTR_FORMAT,
       caps);
-  gst_caps_replace (&stream->pending_caps, caps);
-  gst_caps_unref (caps);
+  gst_stream_set_caps (stream->stream_object, caps);
+  if (caps) {
+    gst_caps_unref (caps);
+    stream->pending_caps = TRUE;
+  }
 }
 
-/* must be called with manifest_lock taken */
+/**
+ * gst_adaptive_demux_stream_set_tags:
+ * @stream: #GstAdaptiveDemuxStream
+ * @tags: (transfer full) (allow-none): #GstTagList
+ *
+ * Set the tags for the stream
+ * must be called with manifest_lock taken
+ */
 void
 gst_adaptive_demux_stream_set_tags (GstAdaptiveDemuxStream * stream,
     GstTagList * tags)
 {
   GST_DEBUG_OBJECT (stream->pad, "setting new tags for stream %" GST_PTR_FORMAT,
       tags);
-  if (stream->pending_tags) {
-    gst_tag_list_unref (stream->pending_tags);
+  gst_stream_set_tags (stream->stream_object, tags);
+  if (tags) {
+    gst_tag_list_unref (tags);
+    stream->pending_tags = TRUE;
   }
-  stream->pending_tags = tags;
+}
+
+/**
+ * gst_adaptive_demux_stream_set_stream_flags:
+ * @stream: #GstAdaptiveDemuxStream
+ * @flags: #GstStreamFlags
+ *
+ * Set the flags for the stream
+ * must be called with manifest_lock taken
+ */
+void
+gst_adaptive_demux_stream_set_stream_flags (GstAdaptiveDemuxStream * stream,
+    GstStreamFlags flags)
+{
+  GST_DEBUG_OBJECT (stream->pad, "setting stream flags for stream 0x%x", flags);
+  gst_stream_set_stream_flags (stream->stream_object, flags);
+}
+
+/**
+ * gst_adaptive_demux_stream_set_stream_type:
+ * @stream: #GstAdaptiveDemuxStream
+ * @type: #GstStreamType
+ *
+ * Set the type for the stream
+ * must be called with manifest_lock taken
+ */
+void
+gst_adaptive_demux_stream_set_stream_type (GstAdaptiveDemuxStream * stream,
+    GstStreamType type)
+{
+  GST_DEBUG_OBJECT (stream->pad, "setting stream type for stream %s",
+      gst_stream_type_get_name (type));
+  gst_stream_set_stream_type (stream->stream_object, type);
 }
 
 /* must be called with manifest_lock taken */
@@ -2384,9 +2440,9 @@ gst_adaptive_demux_stream_push_buffer (GstAdaptiveDemuxStream * stream,
   GST_BUFFER_DURATION (buffer) = GST_CLOCK_TIME_NONE;
   GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
   if (G_UNLIKELY (stream->pending_caps)) {
-    pending_caps = gst_event_new_caps (stream->pending_caps);
-    gst_caps_unref (stream->pending_caps);
-    stream->pending_caps = NULL;
+    pending_caps =
+        gst_event_new_caps (gst_stream_get_caps (stream->stream_object));
+    stream->pending_caps = FALSE;
   }
 
   if (stream->do_block) {
@@ -2424,9 +2480,9 @@ gst_adaptive_demux_stream_push_buffer (GstAdaptiveDemuxStream * stream,
     GST_ADAPTIVE_DEMUX_SEGMENT_UNLOCK (demux);
   }
   if (G_UNLIKELY (stream->pending_tags || stream->bitrate_changed)) {
-    GstTagList *tags = stream->pending_tags;
+    GstTagList *tags = gst_stream_get_tags (stream->stream_object);
 
-    stream->pending_tags = NULL;
+    stream->pending_tags = FALSE;
     stream->bitrate_changed = 0;
 
     if (stream->fragment.bitrate != 0) {
@@ -2437,6 +2493,8 @@ gst_adaptive_demux_stream_push_buffer (GstAdaptiveDemuxStream * stream,
 
       gst_tag_list_add (tags, GST_TAG_MERGE_KEEP,
           GST_TAG_NOMINAL_BITRATE, stream->fragment.bitrate, NULL);
+
+      gst_stream_set_tags (stream->stream_object, tags);
     }
     if (tags)
       pending_tags = gst_event_new_tag (tags);

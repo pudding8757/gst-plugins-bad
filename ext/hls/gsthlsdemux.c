@@ -43,6 +43,7 @@
 
 #include <string.h>
 #include <gst/base/gsttypefindhelper.h>
+#include <gst/tag/tag.h>
 #include "gsthlsdemux.h"
 
 static GstStaticPadTemplate srctemplate = GST_STATIC_PAD_TEMPLATE ("src_%u",
@@ -479,7 +480,7 @@ gst_hls_demux_update_manifest (GstAdaptiveDemux * demux)
   return GST_FLOW_OK;
 }
 
-static void
+static GstAdaptiveDemuxStream *
 create_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist,
     gboolean is_primary_playlist, gboolean selected)
 {
@@ -490,7 +491,7 @@ create_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist,
   if (!selected) {
     /* FIXME: Later, create the stream but mark not-selected */
     GST_LOG_OBJECT (demux, "Ignoring not-selected stream");
-    return;
+    return NULL;
   }
 
   stream = gst_adaptive_demux_stream_new (demux,
@@ -505,6 +506,34 @@ create_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist,
 
   hlsdemux_stream->do_typefind = TRUE;
   hlsdemux_stream->reset_pts = TRUE;
+
+  return stream;
+}
+
+static GstStreamType
+guess_variant_stream_type (GstHLSVariantStream * variant)
+{
+  if (variant->iframe || (variant->width > 0 && variant->height > 0)) {
+    return GST_STREAM_TYPE_VIDEO;
+  }
+
+  /* TODO: need pbutil for parsing RFC6381 codecs string */
+  if (variant->codecs) {
+    if (g_strrstr (variant->codecs, "avc") ||
+        g_strrstr (variant->codecs, "hvc") ||
+        g_strrstr (variant->codecs, "hev") ||
+        g_strrstr (variant->codecs, "mp4v")) {
+      return GST_STREAM_TYPE_VIDEO;
+    }
+
+    if (g_strrstr (variant->codecs, "mp4a") ||
+        g_strrstr (variant->codecs, "ac-3") ||
+        g_strrstr (variant->codecs, "ec-3")) {
+      return GST_STREAM_TYPE_AUDIO;
+    }
+  }
+
+  return GST_STREAM_TYPE_UNKNOWN;
 }
 
 static gboolean
@@ -513,6 +542,7 @@ gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
   GstHLSDemux *hlsdemux = GST_HLS_DEMUX_CAST (demux);
   GstHLSVariantStream *playlist = hlsdemux->current_variant;
   gint i;
+  GstAdaptiveDemuxStream *stream;
 
   if (playlist == NULL) {
     GST_WARNING_OBJECT (demux, "Can't configure streams - no variant selected");
@@ -522,7 +552,11 @@ gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
   gst_hls_demux_clear_all_pending_data (hlsdemux);
 
   /* 1 output for the main playlist */
-  create_stream_for_playlist (demux, playlist->m3u8, TRUE, TRUE);
+  stream = create_stream_for_playlist (demux, playlist->m3u8, TRUE, TRUE);
+  /* Assume that primary playlist is default stream */
+  gst_adaptive_demux_stream_set_stream_flags (stream, GST_STREAM_FLAG_SELECT);
+  gst_adaptive_demux_stream_set_stream_type (stream,
+      guess_variant_stream_type (playlist));
 
   for (i = 0; i < GST_HLS_N_MEDIA_TYPES; ++i) {
     GList *mlist = playlist->media[i];
@@ -539,9 +573,29 @@ gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
       }
       GST_LOG_OBJECT (demux, "media of type %d - %s, uri: %s", i,
           media->name, media->uri);
-      create_stream_for_playlist (demux, media->playlist, FALSE,
+      stream = create_stream_for_playlist (demux, media->playlist, FALSE,
           (media->mtype == GST_HLS_MEDIA_TYPE_VIDEO ||
               media->mtype == GST_HLS_MEDIA_TYPE_AUDIO));
+      if (stream) {
+        if (media->lang) {
+          GstTagList *tags;
+          if (gst_tag_check_language_code (media->lang))
+            tags = gst_tag_list_new (GST_TAG_LANGUAGE_CODE, media->lang, NULL);
+          else
+            tags = gst_tag_list_new (GST_TAG_LANGUAGE_NAME, media->lang, NULL);
+
+          gst_adaptive_demux_stream_set_tags (stream, tags);
+        }
+
+        /* TODO: expose more tags if any (e.g., codec) */
+        if (media->mtype == GST_HLS_MEDIA_TYPE_VIDEO) {
+          gst_adaptive_demux_stream_set_stream_type (stream,
+              GST_STREAM_TYPE_VIDEO);
+        } else if (media->mtype == GST_HLS_MEDIA_TYPE_AUDIO) {
+          gst_adaptive_demux_stream_set_stream_type (stream,
+              GST_STREAM_TYPE_AUDIO);
+        }
+      }
 
       mlist = mlist->next;
     }

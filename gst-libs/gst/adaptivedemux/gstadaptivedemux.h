@@ -129,11 +129,13 @@ struct _GstAdaptiveDemuxStream
 
   GstAdaptiveDemux *demux;
 
+  GstStream *stream_object;
+
   GstSegment segment;
 
-  GstCaps *pending_caps;
+  gboolean pending_caps;
   GstEvent *pending_segment;
-  GstTagList *pending_tags;
+  gboolean pending_tags;
   gboolean need_header;
   GList *pending_events;
 
@@ -509,6 +511,14 @@ void gst_adaptive_demux_stream_set_caps (GstAdaptiveDemuxStream * stream,
 GST_ADAPTIVE_DEMUX_API
 void gst_adaptive_demux_stream_set_tags (GstAdaptiveDemuxStream * stream,
                                          GstTagList * tags);
+
+GST_ADAPTIVE_DEMUX_API
+void gst_adaptive_demux_stream_set_stream_flags (GstAdaptiveDemuxStream * stream,
+                                                 GstStreamFlags flags);
+
+GST_ADAPTIVE_DEMUX_API
+void gst_adaptive_demux_stream_set_stream_type  (GstAdaptiveDemuxStream * stream,
+                                                 GstStreamType type);
 
 GST_ADAPTIVE_DEMUX_API
 void gst_adaptive_demux_stream_fragment_clear (GstAdaptiveDemuxStreamFragment * f);

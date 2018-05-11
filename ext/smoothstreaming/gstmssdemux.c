@@ -444,6 +444,8 @@ gst_mss_demux_setup_streams (GstAdaptiveDemux * demux)
     GstPad *srcpad = NULL;
     GstMssDemuxStream *stream = NULL;
     GstMssStream *manifeststream = iter->data;
+    GstMssStreamType streamtype;
+    GstStreamType type = GST_STREAM_TYPE_UNKNOWN;
 
     srcpad = _create_pad (mssdemux, manifeststream);
 
@@ -454,6 +456,21 @@ gst_mss_demux_setup_streams (GstAdaptiveDemux * demux)
     stream = (GstMssDemuxStream *)
         gst_adaptive_demux_stream_new (GST_ADAPTIVE_DEMUX_CAST (mssdemux),
         srcpad);
+
+    streamtype = gst_mss_stream_get_type (manifeststream);
+    switch (streamtype) {
+      case MSS_STREAM_TYPE_AUDIO:
+        type = GST_STREAM_TYPE_AUDIO;
+        break;
+      case MSS_STREAM_TYPE_VIDEO:
+        type = GST_STREAM_TYPE_VIDEO;
+        break;
+      default:
+        break;
+    }
+    gst_adaptive_demux_stream_set_stream_type
+        (GST_ADAPTIVE_DEMUX_STREAM_CAST (stream), type);
+
     stream->manifest_stream = manifeststream;
     gst_mss_stream_set_active (manifeststream, TRUE);
     active_streams = g_slist_prepend (active_streams, stream);

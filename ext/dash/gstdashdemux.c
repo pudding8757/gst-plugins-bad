@@ -769,6 +769,35 @@ gst_dash_demux_setup_mpdparser_streams (GstDashDemux * demux,
   return has_streams;
 }
 
+static GstStreamType
+gst_dash_demux_set_stream_type (GstDashDemux * demux, GstDashDemuxStream *
+    stream, GstCaps * caps)
+{
+  GstStreamType type = GST_STREAM_TYPE_UNKNOWN;
+  GstActiveStream *active_stream = stream->active_stream;
+
+  g_return_val_if_fail (active_stream != NULL, GST_STREAM_TYPE_UNKNOWN);
+
+  switch (active_stream->mimeType) {
+    case GST_STREAM_VIDEO:
+      type = GST_STREAM_TYPE_VIDEO;
+      break;
+    case GST_STREAM_AUDIO:
+      type = GST_STREAM_TYPE_AUDIO;
+      break;
+    case GST_STREAM_APPLICATION:
+      type = GST_STREAM_TYPE_TEXT;
+      break;
+    default:
+      break;
+  }
+
+  gst_adaptive_demux_stream_set_stream_type (GST_ADAPTIVE_DEMUX_STREAM_CAST
+      (stream), type);
+
+  return type;
+}
+
 static gboolean
 gst_dash_demux_setup_all_streams (GstDashDemux * demux)
 {
@@ -849,11 +878,15 @@ gst_dash_demux_setup_all_streams (GstDashDemux * demux)
     if (stream->is_isobmff
         || gst_mpd_client_has_isoff_ondemand_profile (demux->client))
       stream->adapter = gst_adapter_new ();
+    gst_dash_demux_set_stream_type (demux, stream, caps);
     gst_adaptive_demux_stream_set_caps (GST_ADAPTIVE_DEMUX_STREAM_CAST (stream),
         caps);
     if (tags)
       gst_adaptive_demux_stream_set_tags (GST_ADAPTIVE_DEMUX_STREAM_CAST
           (stream), tags);
+    if (active_stream->mimeType == GST_STREAM_APPLICATION)
+      gst_adaptive_demux_stream_set_stream_flags (GST_ADAPTIVE_DEMUX_STREAM_CAST
+          (stream), GST_STREAM_FLAG_SPARSE);
     stream->index = i;
     stream->pending_seek_ts = GST_CLOCK_TIME_NONE;
     stream->sidx_position = GST_CLOCK_TIME_NONE;

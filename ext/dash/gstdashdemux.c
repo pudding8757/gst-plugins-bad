@@ -2486,8 +2486,8 @@ gst_dash_demux_update_manifest_data (GstAdaptiveDemux * demux,
     /* If no pads have been exposed yet, need to use those */
     streams = NULL;
     if (demux->streams == NULL) {
-      if (demux->prepared_streams) {
-        streams = demux->prepared_streams;
+      if (demux->next_streams) {
+        streams = demux->next_streams;
       }
     } else {
       streams = demux->streams;

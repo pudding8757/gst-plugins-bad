@@ -2324,7 +2324,7 @@ gst_adaptive_demux_stream_push_buffer (GstAdaptiveDemuxStream * stream,
   GstEvent *pending_caps = NULL, *pending_segment = NULL, *pending_tags = NULL;
   GList *pending_events = NULL;
 
-  /* FIXME : 
+  /* FIXME :
    * This is duplicating *exactly* the same thing as what is done at the beginning
    * of _src_chain if starting_fragment is TRUE */
   if (stream->first_fragment_buffer) {

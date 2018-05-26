@@ -92,6 +92,7 @@ typedef struct _GstAdaptiveDemuxStream GstAdaptiveDemuxStream;
 typedef struct _GstAdaptiveDemux GstAdaptiveDemux;
 typedef struct _GstAdaptiveDemuxClass GstAdaptiveDemuxClass;
 typedef struct _GstAdaptiveDemuxPrivate GstAdaptiveDemuxPrivate;
+typedef struct _GstAdaptiveDemuxOutputSlot GstAdaptiveDemuxOutputSlot;
 
 struct _GstAdaptiveDemuxStreamFragment
 {
@@ -126,6 +127,7 @@ struct _GstAdaptiveDemuxStream
 {
   GstPad *pad;
   GstPad *internal_pad;
+  GstElement *bin;
 
   GstAdaptiveDemux *demux;
 
@@ -195,6 +197,8 @@ struct _GstAdaptiveDemuxStream
 
   /* TODO check if used */
   gboolean eos;
+
+  GstAdaptiveDemuxOutputSlot *slot;
 };
 
 /**

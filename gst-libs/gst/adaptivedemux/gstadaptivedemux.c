@@ -205,6 +205,26 @@ struct _GstAdaptiveDemuxPrivate
    * without needing to stop tasks when they just want to
    * update the segment boundaries */
   GMutex segment_lock;
+
+  /* counters for pads */
+  guint32 apadcount, vpadcount, tpadcount, opadcount;
+
+  GList *slots;
+};
+
+struct _GstAdaptiveDemuxOutputSlot
+{
+  GstAdaptiveDemux *demux;
+
+  /* ghost pad */
+  GstPad *src_pad;
+
+  GstStreamType type;
+
+  /* protected by manifest_lock */
+  GstAdaptiveDemuxStream *active_stream;
+  GstAdaptiveDemuxStream *pending_stream;
+  gboolean exposed;
 };
 
 typedef struct _GstAdaptiveDemuxTimer
@@ -267,6 +287,7 @@ static gboolean gst_adaptive_demux_has_next_period (GstAdaptiveDemux * demux);
 static void gst_adaptive_demux_advance_period (GstAdaptiveDemux * demux);
 
 static void gst_adaptive_demux_stream_free (GstAdaptiveDemuxStream * stream);
+static void gst_adaptive_demux_slot_free (GstAdaptiveDemuxOutputSlot * stream);
 static GstFlowReturn
 gst_adaptive_demux_stream_push_event (GstAdaptiveDemuxStream * stream,
     GstEvent * event);
@@ -773,8 +794,6 @@ gst_adaptive_demux_reset (GstAdaptiveDemux * demux)
     if (stream->pad) {
       gst_pad_push_event (stream->pad, gst_event_ref (eos));
       gst_pad_set_active (stream->pad, FALSE);
-
-      gst_element_remove_pad (GST_ELEMENT_CAST (demux), stream->pad);
     }
     gst_adaptive_demux_stream_free (stream);
   }
@@ -797,6 +816,12 @@ gst_adaptive_demux_reset (GstAdaptiveDemux * demux)
     g_list_free_full (demux->priv->old_streams,
         (GDestroyNotify) gst_adaptive_demux_stream_free);
     demux->priv->old_streams = NULL;
+  }
+
+  if (demux->priv->slots) {
+    GList *slots = demux->priv->slots;
+    demux->priv->slots = NULL;
+    g_list_free_full (slots, (GDestroyNotify) gst_adaptive_demux_slot_free);
   }
 
   g_free (demux->manifest_uri);
@@ -923,6 +948,9 @@ gst_adaptive_demux_prepare_stream (GstAdaptiveDemux * demux,
   gst_pad_set_active (pad, TRUE);
   stream->need_header = TRUE;
 
+  gst_element_add_pad (stream->bin, pad);
+  gst_element_sync_state_with_parent (stream->bin);
+
   event =
       gst_pad_get_sticky_event (GST_ADAPTIVE_DEMUX_SINK_PAD (demux),
       GST_EVENT_STREAM_START, 0);
@@ -953,14 +981,114 @@ gst_adaptive_demux_prepare_stream (GstAdaptiveDemux * demux,
   return TRUE;
 }
 
+static GstAdaptiveDemuxOutputSlot *
+gst_adaptive_demux_create_slot (GstAdaptiveDemux * demux, GstStreamType type)
+{
+  GstAdaptiveDemuxOutputSlot *slot;
+  gchar *pad_name;
+  const gchar *prefix;
+  guint32 *counter;
+
+  slot = g_new0 (GstAdaptiveDemuxOutputSlot, 1);
+
+  GST_DEBUG_OBJECT (demux, "Created new slot %p for type %s",
+      slot, GST_STR_NULL (gst_stream_type_get_name (type)));
+
+  slot->demux = demux;
+  slot->type = type;
+
+  if (type & GST_STREAM_TYPE_VIDEO) {
+    counter = &demux->priv->vpadcount;
+    prefix = "video";
+  } else if (type & GST_STREAM_TYPE_AUDIO) {
+    counter = &demux->priv->apadcount;
+    prefix = "audio";
+  } else if (type & GST_STREAM_TYPE_TEXT) {
+    counter = &demux->priv->tpadcount;
+    prefix = "text";
+  } else {
+    counter = &demux->priv->opadcount;
+    prefix = "src";
+  }
+
+  pad_name = g_strdup_printf ("%s_%u", prefix, *counter);
+  *counter += 1;
+  slot->src_pad = gst_ghost_pad_new_no_target (pad_name, GST_PAD_SRC);
+  g_free (pad_name);
+
+  gst_pad_set_element_private (slot->src_pad, slot);
+  gst_pad_set_query_function (slot->src_pad,
+      GST_DEBUG_FUNCPTR (gst_adaptive_demux_src_query));
+  gst_pad_set_event_function (slot->src_pad,
+      GST_DEBUG_FUNCPTR (gst_adaptive_demux_src_event));
+
+  gst_pad_set_active (slot->src_pad, TRUE);
+
+  return slot;
+}
+
+static gboolean
+gst_adaptive_demux_slot_link (GstAdaptiveDemuxOutputSlot * slot,
+    GstAdaptiveDemuxStream * stream)
+{
+  if (!gst_ghost_pad_set_target ((GstGhostPad *) slot->src_pad, stream->pad)) {
+    GST_ERROR_OBJECT (stream->pad, "Could not set target pad");
+    slot->active_stream = NULL;
+    return FALSE;
+  }
+
+  stream->slot = slot;
+  slot->pending_stream = stream;
+
+  return TRUE;
+}
+
+static gboolean
+gst_adaptive_demux_slot_expose (GstAdaptiveDemuxOutputSlot * slot)
+{
+  gboolean ret = TRUE;
+
+  if (!slot->pending_stream) {
+    GST_ERROR_OBJECT (slot->src_pad, "Slot has no pending stream");
+    return FALSE;
+  }
+
+  slot->active_stream = slot->pending_stream;
+
+  /* Don't hold the manifest lock while exposing a pad */
+  if (!slot->exposed) {
+    GST_MANIFEST_UNLOCK (slot->demux);
+    ret = gst_element_add_pad (GST_ELEMENT_CAST (slot->demux), slot->src_pad);
+    GST_MANIFEST_LOCK (slot->demux);
+
+    slot->exposed = TRUE;
+  }
+
+  return ret;
+}
+
+static void
+gst_adaptive_demux_slot_free (GstAdaptiveDemuxOutputSlot * slot)
+{
+  gst_pad_set_active (slot->src_pad, FALSE);
+
+  if (slot->exposed) {
+    GST_MANIFEST_UNLOCK (slot->demux);
+    gst_element_remove_pad (GST_ELEMENT_CAST (slot->demux), slot->src_pad);
+    GST_MANIFEST_LOCK (slot->demux);
+  }
+
+  g_free (slot);
+}
+
 static gboolean
 gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
     GstAdaptiveDemuxStream * stream)
 {
-  gboolean ret;
   GstPad *pad = stream->pad;
   GstCaps *caps;
   GstStream *stream_obj = stream->stream_object;
+  GstAdaptiveDemuxOutputSlot *slot;
 
   caps = gst_stream_get_caps (stream_obj);
   if (stream->pending_caps) {
@@ -973,14 +1101,15 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
   if (caps)
     gst_caps_unref (caps);
 
-  gst_object_ref (pad);
+  slot = gst_adaptive_demux_create_slot (demux,
+      gst_stream_get_stream_type (stream_obj));
 
-  /* Don't hold the manifest lock while exposing a pad */
-  GST_MANIFEST_UNLOCK (demux);
-  ret = gst_element_add_pad (GST_ELEMENT_CAST (demux), pad);
-  GST_MANIFEST_LOCK (demux);
+  demux->priv->slots = g_list_append (demux->priv->slots, slot);
 
-  return ret;
+  if (!gst_adaptive_demux_slot_link (slot, stream))
+    return FALSE;
+
+  return gst_adaptive_demux_slot_expose (slot);
 }
 
 /* must be called with manifest_lock taken */
@@ -1213,7 +1342,16 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
      */
     for (iter = old_streams; iter; iter = g_list_next (iter)) {
       GstAdaptiveDemuxStream *stream = iter->data;
-      GstPad *pad = gst_object_ref (GST_PAD (stream->pad));
+      GstPad *pad = stream->pad;
+      GstAdaptiveDemuxOutputSlot *slot = stream->slot;
+
+      stream->slot = NULL;
+
+      /* Unlink stream from slot, if any */
+      if (slot) {
+        slot->active_stream = NULL;
+        demux->priv->slots = g_list_remove (demux->priv->slots, slot);
+      }
 
       GST_MANIFEST_UNLOCK (demux);
 
@@ -1222,10 +1360,9 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
       gst_pad_set_active (pad, FALSE);
 
       GST_LOG_OBJECT (pad, "Removing stream");
-      gst_element_remove_pad (GST_ELEMENT (demux), pad);
       GST_MANIFEST_LOCK (demux);
-
-      gst_object_unref (GST_OBJECT (pad));
+      if (slot)
+        gst_adaptive_demux_slot_free (slot);
 
       /* ask the download task to stop.
        * We will not join it now, because our thread can be one of these tasks.
@@ -1266,6 +1403,7 @@ gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
 {
   GstAdaptiveDemuxStream *stream;
   gchar *stream_id;
+  gchar *name;
 
   stream = g_malloc0 (demux->stream_struct_size);
 
@@ -1276,17 +1414,17 @@ gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
       stream, NULL);
   gst_task_set_lock (stream->download_task, &stream->download_lock);
 
+  name = g_strdup_printf ("streambin-%s", GST_PAD_NAME (pad));
+  stream->bin = gst_bin_new (name);
+  g_free (name);
+
+  gst_bin_add (GST_BIN_CAST (demux), stream->bin);
+
   stream->pad = pad;
   stream->demux = demux;
   stream->fragment_bitrates =
       g_malloc0 (sizeof (guint64) * NUM_LOOKBACK_FRAGMENTS);
-  gst_pad_set_element_private (pad, stream);
   stream->qos_earliest_time = GST_CLOCK_TIME_NONE;
-
-  gst_pad_set_query_function (pad,
-      GST_DEBUG_FUNCPTR (gst_adaptive_demux_src_query));
-  gst_pad_set_event_function (pad,
-      GST_DEBUG_FUNCPTR (gst_adaptive_demux_src_event));
 
   gst_segment_init (&stream->segment, GST_FORMAT_TIME);
   g_cond_init (&stream->fragment_download_cond);
@@ -1390,21 +1528,34 @@ gst_adaptive_demux_stream_free (GstAdaptiveDemuxStream * stream)
     GST_MANIFEST_UNLOCK (demux);
     gst_element_set_locked_state (src, TRUE);
     gst_element_set_state (src, GST_STATE_NULL);
-    gst_bin_remove (GST_BIN_CAST (demux), src);
+    gst_bin_remove (GST_BIN_CAST (stream->bin), src);
     GST_MANIFEST_LOCK (demux);
+  }
+
+  if (stream->slot) {
+    GstAdaptiveDemuxOutputSlot *slot = stream->slot;
+    stream->slot = NULL;
+    stream->demux->priv->slots =
+        g_list_remove (stream->demux->priv->slots, slot);
+    gst_adaptive_demux_slot_free (slot);
   }
 
   g_cond_clear (&stream->fragment_download_cond);
   g_mutex_clear (&stream->fragment_download_lock);
   g_free (stream->fragment_bitrates);
 
-  if (stream->pad) {
-    gst_object_unref (stream->pad);
-    stream->pad = NULL;
-  }
-
   if (stream->stream_object)
     gst_object_unref (stream->stream_object);
+
+  if (stream->bin) {
+    GstElement *stream_bin = stream->bin;
+
+    GST_MANIFEST_UNLOCK (demux);
+    gst_element_set_locked_state (stream_bin, TRUE);
+    gst_element_set_state (stream_bin, GST_STATE_NULL);
+    gst_bin_remove (GST_BIN_CAST (demux), stream_bin);
+    GST_MANIFEST_LOCK (demux);
+  }
 
   g_free (stream);
 }
@@ -1779,6 +1930,7 @@ gst_adaptive_demux_src_event (GstPad * pad, GstObject * parent,
     GstEvent * event)
 {
   GstAdaptiveDemux *demux;
+  GstAdaptiveDemuxOutputSlot *slot = gst_pad_get_element_private (pad);
 
   demux = GST_ADAPTIVE_DEMUX_CAST (parent);
 
@@ -1800,7 +1952,7 @@ gst_adaptive_demux_src_event (GstPad * pad, GstObject * parent,
       GstAdaptiveDemuxStream *stream;
 
       GST_MANIFEST_LOCK (demux);
-      stream = gst_adaptive_demux_find_stream_for_pad (demux, pad);
+      stream = slot->active_stream;
 
       if (stream) {
         if (!stream->cancelled && demux->running &&
@@ -1830,7 +1982,7 @@ gst_adaptive_demux_src_event (GstPad * pad, GstObject * parent,
       GstAdaptiveDemuxStream *stream;
 
       GST_MANIFEST_LOCK (demux);
-      stream = gst_adaptive_demux_find_stream_for_pad (demux, pad);
+      stream = slot->active_stream;
 
       if (stream) {
         GstClockTimeDiff diff;
@@ -2483,8 +2635,8 @@ _src_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   GstAdaptiveDemuxClass *klass;
   GstFlowReturn ret = GST_FLOW_OK;
 
-  demux = GST_ADAPTIVE_DEMUX_CAST (parent);
   stream = gst_pad_get_element_private (pad);
+  demux = stream->demux;
   klass = GST_ADAPTIVE_DEMUX_GET_CLASS (demux);
 
   GST_MANIFEST_LOCK (demux);
@@ -2871,7 +3023,7 @@ gst_adaptive_demux_stream_update_source (GstAdaptiveDemuxStream * stream,
       GST_MANIFEST_UNLOCK (demux);
       gst_element_set_locked_state (src, TRUE);
       gst_element_set_state (src, GST_STATE_NULL);
-      gst_bin_remove (GST_BIN_CAST (demux), src);
+      gst_bin_remove (GST_BIN_CAST (stream->bin), src);
       GST_MANIFEST_LOCK (demux);
       GST_DEBUG_OBJECT (demux, "Can't re-use old source element");
     } else {
@@ -2891,7 +3043,7 @@ gst_adaptive_demux_stream_update_source (GstAdaptiveDemuxStream * stream,
         GST_MANIFEST_UNLOCK (demux);
         gst_element_set_locked_state (src, TRUE);
         gst_element_set_state (src, GST_STATE_NULL);
-        gst_bin_remove (GST_BIN_CAST (demux), src);
+        gst_bin_remove (GST_BIN_CAST (stream->bin), src);
         GST_MANIFEST_LOCK (demux);
       }
     }
@@ -3003,7 +3155,7 @@ gst_adaptive_demux_stream_update_source (GstAdaptiveDemuxStream * stream,
     gst_element_add_pad (stream->src, stream->src_srcpad);
 
     gst_element_set_locked_state (stream->src, TRUE);
-    gst_bin_add (GST_BIN_CAST (demux), stream->src);
+    gst_bin_add (GST_BIN_CAST (stream->bin), stream->src);
     stream->src_srcpad = gst_element_get_static_pad (stream->src, "src");
 
     /* set up our internal floating pad to drop all events from
@@ -3013,7 +3165,7 @@ gst_adaptive_demux_stream_update_source (GstAdaptiveDemuxStream * stream,
     stream->internal_pad = gst_pad_new (internal_name, GST_PAD_SINK);
     g_free (internal_name);
     gst_object_set_parent (GST_OBJECT_CAST (stream->internal_pad),
-        GST_OBJECT_CAST (demux));
+        GST_OBJECT_CAST (stream->bin));
     GST_OBJECT_FLAG_SET (stream->internal_pad, GST_PAD_FLAG_NEED_PARENT);
     gst_pad_set_element_private (stream->internal_pad, stream);
     gst_pad_set_active (stream->internal_pad, TRUE);

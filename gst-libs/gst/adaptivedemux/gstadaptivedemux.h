@@ -236,6 +236,8 @@ struct _GstAdaptiveDemux
   GstClock *realtime_clock;
   gint64 clock_offset; /* offset between realtime_clock and UTC (in usec) */
 
+  gboolean streams_aware;
+
   /* < private > */
   GstAdaptiveDemuxPrivate *priv;
 };

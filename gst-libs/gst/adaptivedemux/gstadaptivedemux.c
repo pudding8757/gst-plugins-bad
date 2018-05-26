@@ -827,6 +827,11 @@ gst_adaptive_demux_reset (GstAdaptiveDemux * demux)
   demux->have_group_id = FALSE;
   demux->group_id = G_MAXUINT;
   demux->priv->segment_seqnum = gst_util_seqnum_next ();
+
+  demux->streams_aware = GST_OBJECT_PARENT (demux)
+      && GST_OBJECT_FLAG_IS_SET (GST_OBJECT_PARENT (demux),
+      GST_BIN_FLAG_STREAMS_AWARE);
+  GST_DEBUG_OBJECT (demux, "Streams aware : %d", demux->streams_aware);
 }
 
 static void

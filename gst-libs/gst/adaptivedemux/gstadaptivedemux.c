@@ -167,6 +167,7 @@ enum
 
 /* Internal, so not using GST_FLOW_CUSTOM_SUCCESS_N */
 #define GST_ADAPTIVE_DEMUX_FLOW_SWITCH (GST_FLOW_CUSTOM_SUCCESS_2 + 1)
+#define GST_ADAPTIVE_DEMUX_FLOW_UNSELECTED (GST_FLOW_CUSTOM_SUCCESS_2 + 2)
 
 struct _GstAdaptiveDemuxPrivate
 {
@@ -210,6 +211,20 @@ struct _GstAdaptiveDemuxPrivate
   guint32 apadcount, vpadcount, tpadcount, opadcount;
 
   GList *slots;
+
+  /* streams-aware */
+  GstStreamCollection *collection;
+  /* requested selection of stream-id to activate slot */
+  GList *requested_selection;
+  /* list of stream-id currently activated in slot */
+  GList *active_selection;
+  /* Pending select streams event */
+  guint32 select_streams_seqnum;
+  /* pending list of streams to select (from downstream) */
+  GList *pending_select_streams;
+  /* TRUE if requested_selection was updated, will become FALSE once
+   * it has fully transitioned to active */
+  gboolean selection_updated;
 };
 
 struct _GstAdaptiveDemuxOutputSlot
@@ -254,6 +269,8 @@ static gboolean gst_adaptive_demux_src_query (GstPad * pad, GstObject * parent,
     GstQuery * query);
 static gboolean gst_adaptive_demux_src_event (GstPad * pad, GstObject * parent,
     GstEvent * event);
+static gboolean gst_adaptive_demux_send_event (GstElement * element, GstEvent *
+    evnet);
 
 static gboolean
 gst_adaptive_demux_push_src_event (GstAdaptiveDemux * demux, GstEvent * event);
@@ -437,6 +454,7 @@ gst_adaptive_demux_class_init (GstAdaptiveDemuxClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gstelement_class->change_state = gst_adaptive_demux_change_state;
+  gstelement_class->send_event = gst_adaptive_demux_send_event;
 
   gstbin_class->handle_message = gst_adaptive_demux_handle_message;
 
@@ -824,6 +842,21 @@ gst_adaptive_demux_reset (GstAdaptiveDemux * demux)
     g_list_free_full (slots, (GDestroyNotify) gst_adaptive_demux_slot_free);
   }
 
+  if (demux->priv->requested_selection) {
+    g_list_free_full (demux->priv->requested_selection, g_free);
+    demux->priv->requested_selection = NULL;
+  }
+
+  if (demux->priv->active_selection) {
+    g_list_free_full (demux->priv->active_selection, g_free);
+    demux->priv->active_selection = NULL;
+  }
+
+  if (demux->priv->collection) {
+    gst_object_unref (demux->priv->collection);
+    demux->priv->collection = NULL;
+  }
+
   g_free (demux->manifest_uri);
   g_free (demux->manifest_base_uri);
   demux->manifest_uri = NULL;
@@ -1058,6 +1091,7 @@ static gboolean
 gst_adaptive_demux_slot_expose (GstAdaptiveDemuxOutputSlot * slot)
 {
   gboolean ret = TRUE;
+  GstAdaptiveDemux *demux = slot->demux;
 
   if (!slot->pending_stream) {
     GST_ERROR_OBJECT (slot->src_pad, "Slot has no pending stream");
@@ -1065,6 +1099,9 @@ gst_adaptive_demux_slot_expose (GstAdaptiveDemuxOutputSlot * slot)
   }
 
   slot->active_stream = slot->pending_stream;
+  demux->priv->active_selection =
+      g_list_append (demux->priv->active_selection,
+      g_strdup (gst_stream_get_stream_id (slot->active_stream->stream_object)));
 
   /* Don't hold the manifest lock while exposing a pad */
   if (!slot->exposed) {
@@ -1178,6 +1215,21 @@ gst_adaptive_demux_find_free_compatible_slot (GstAdaptiveDemuxStream * stream)
   return ret;
 }
 
+static const gchar *
+stream_in_list (GList * list, const gchar * sid)
+{
+  GList *tmp;
+
+  for (tmp = list; tmp; tmp = tmp->next) {
+    const gchar *osid = (gchar *) tmp->data;
+    if (!g_strcmp0 (sid, osid)) {
+      return osid;
+    }
+  }
+
+  return NULL;
+}
+
 static gboolean
 gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
     GstAdaptiveDemuxStream * stream)
@@ -1199,6 +1251,12 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
 
   /* Reuse output slot if possible */
   if (demux->streams_aware) {
+    const gchar *sid = gst_stream_get_stream_id (stream_obj);
+    if (!stream_in_list (demux->priv->requested_selection, sid)) {
+      GST_DEBUG_OBJECT (stream->pad, "Skip exposing unselected stream %s", sid);
+      goto beach;
+    }
+
     slot = gst_adaptive_demux_find_free_compatible_slot (stream);
 
     if (slot) {
@@ -1216,7 +1274,7 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
       }
     } else {
       slot = gst_adaptive_demux_create_slot (demux,
-      gst_stream_get_stream_type (stream_obj));
+          gst_stream_get_stream_type (stream_obj));
 
       demux->priv->slots = g_list_append (demux->priv->slots, slot);
       ret = gst_adaptive_demux_slot_link (slot, stream);
@@ -1273,6 +1331,164 @@ gst_adaptive_demux_get_period_start_time (GstAdaptiveDemux * demux)
   return klass->get_period_start_time (demux);
 }
 
+/* sort_streams:
+ * GCompareFunc to use with lists of GstStream.
+ * Sorts GstStreams by stream type and SELECT flag and stream-id
+ * First video, then audio, then others.
+ *
+ * Return: negative if a<b, 0 if a==b, positive if a>b
+ *
+ * NOTE: copied from decodebin3
+ */
+static gint
+sort_streams (GstAdaptiveDemuxStream * asa, GstAdaptiveDemuxStream * asb)
+{
+  GstStreamType typea, typeb;
+  GstStreamFlags flaga, flagb;
+  const gchar *ida, *idb;
+  gint ret = 0;
+  GstStream *sa = asa->stream_object;
+  GstStream *sb = asb->stream_object;
+
+  typea = gst_stream_get_stream_type (sa);
+  typeb = gst_stream_get_stream_type (sb);
+
+  GST_LOG ("sa(%s), sb(%s)", gst_stream_get_stream_id (sa),
+      gst_stream_get_stream_id (sb));
+
+  /* Sort by stream type. First video, then audio, then others(text, container, unknown) */
+  if (typea != typeb) {
+    if (typea & GST_STREAM_TYPE_VIDEO)
+      ret = -1;
+    else if (typea & GST_STREAM_TYPE_AUDIO)
+      ret = (!(typeb & GST_STREAM_TYPE_VIDEO)) ? -1 : 1;
+    else if (typea & GST_STREAM_TYPE_TEXT)
+      ret = (!(typeb & GST_STREAM_TYPE_VIDEO)
+          && !(typeb & GST_STREAM_TYPE_AUDIO)) ? -1 : 1;
+    else if (typea & GST_STREAM_TYPE_CONTAINER)
+      ret = (typeb & GST_STREAM_TYPE_UNKNOWN) ? -1 : 1;
+    else
+      ret = 1;
+
+    if (ret != 0) {
+      GST_LOG ("Sort by stream-type: %d", ret);
+      return ret;
+    }
+  }
+
+  /* Sort by SELECT flag, if stream type is same. */
+  flaga = gst_stream_get_stream_flags (sa);
+  flagb = gst_stream_get_stream_flags (sb);
+
+  ret =
+      (flaga & GST_STREAM_FLAG_SELECT) ? ((flagb & GST_STREAM_FLAG_SELECT) ? 0 :
+      -1) : ((flagb & GST_STREAM_FLAG_SELECT) ? 1 : 0);
+
+  if (ret != 0) {
+    GST_LOG ("Sort by SELECT flag: %d", ret);
+    return ret;
+  }
+  /* Sort by SELECT flag, if stream type is same. */
+  flaga = gst_stream_get_stream_flags (sa);
+  flagb = gst_stream_get_stream_flags (sb);
+
+  ret =
+      (flaga & GST_STREAM_FLAG_SELECT) ? ((flagb & GST_STREAM_FLAG_SELECT) ? 0 :
+      -1) : ((flagb & GST_STREAM_FLAG_SELECT) ? 1 : 0);
+
+  if (ret != 0) {
+    GST_LOG ("Sort by SELECT flag: %d", ret);
+    return ret;
+  }
+
+  /* Sort by stream-id, if otherwise the same. */
+  ida = gst_stream_get_stream_id (sa);
+  idb = gst_stream_get_stream_id (sb);
+  ret = g_strcmp0 (ida, idb);
+
+  GST_LOG ("Sort by stream-id: %d", ret);
+
+  return ret;
+}
+
+/* must be called with manifest_lock taken */
+static void
+gst_adaptive_demux_update_requested_selection (GstAdaptiveDemux * demux)
+{
+  guint i, nb;
+  GList *tmp = NULL;
+  GstStreamType used_types = 0;
+  GstStreamCollection *collection;
+
+  /* 1. Is there a pending SELECT_STREAMS we can return straight away */
+  if (demux->priv->pending_select_streams) {
+    GST_DEBUG_OBJECT (demux,
+        "No need to create pending selection, SELECT_STREAMS underway");
+    tmp = demux->priv->pending_select_streams;
+    demux->priv->pending_select_streams = NULL;
+    goto beach;
+  }
+
+  collection = demux->priv->collection;
+  if (G_UNLIKELY (collection == NULL)) {
+    GST_DEBUG_OBJECT (demux, "No current GstStreamCollection");
+    goto beach;
+  }
+
+  nb = gst_stream_collection_get_size (collection);
+
+  /* 2. If not, are we in EXPOSE_ALL_MODE ? If so, match everything */
+  GST_FIXME_OBJECT (demux, "Implement EXPOSE_ALL_MODE");
+
+  /* 3. If not, check if we already have some of the streams in the
+   * existing active/requested selection */
+  for (i = 0; i < nb; i++) {
+    GstStream *stream = gst_stream_collection_get_stream (collection, i);
+    const gchar *sid = gst_stream_get_stream_id (stream);
+    GstStreamType curtype = gst_stream_get_stream_type (stream);
+
+    GST_DEBUG_OBJECT (demux, "stream %s , type %s", sid,
+        GST_STR_NULL (gst_stream_type_get_name (curtype)));
+
+    if (stream_in_list (demux->priv->requested_selection, sid) ||
+        stream_in_list (demux->priv->active_selection, sid)) {
+      GST_DEBUG_OBJECT (demux,
+          "Re-using stream already present in requested or active selection : %s",
+          sid);
+      tmp = g_list_append (tmp, g_strdup (sid));
+      used_types |= curtype;
+    }
+  }
+
+  /* 4. If not, match one stream of each type */
+  for (i = 0; i < nb; i++) {
+    GstStream *stream = gst_stream_collection_get_stream (collection, i);
+    GstStreamType curtype = gst_stream_get_stream_type (stream);
+    /* expose unknown type of stream anyway */
+    if (!(used_types & curtype) || curtype == GST_STREAM_TYPE_UNKNOWN) {
+      const gchar *sid = gst_stream_get_stream_id (stream);
+      GST_DEBUG_OBJECT (demux, "Selecting stream '%s' of type %s",
+          sid, gst_stream_type_get_name (curtype));
+      tmp = g_list_append (tmp, (gchar *) sid);
+      used_types |= curtype;
+    }
+  }
+
+beach:
+  /* Finally set the requested selection */
+  if (tmp) {
+    if (demux->priv->requested_selection) {
+      GST_FIXME_OBJECT (demux,
+          "Replacing non-NULL requested_selection, what should we do ??");
+      g_list_free_full (demux->priv->requested_selection, g_free);
+    }
+    demux->priv->requested_selection =
+        g_list_copy_deep (tmp, (GCopyFunc) g_strdup, NULL);
+    demux->priv->selection_updated = TRUE;
+    g_list_free (tmp);
+  }
+}
+
 /* must be called with manifest_lock taken */
 static gboolean
 gst_adaptive_demux_prepare_streams (GstAdaptiveDemux * demux,
@@ -1280,12 +1496,68 @@ gst_adaptive_demux_prepare_streams (GstAdaptiveDemux * demux,
 {
   GList *iter;
   GstClockTime period_start, min_pts = GST_CLOCK_TIME_NONE;
+  GstStreamCollection *collection = NULL;
+#ifndef GST_DISABLE_GST_DEBUG
+  guint i;
+#endif
 
   g_return_val_if_fail (demux->next_streams != NULL, FALSE);
 
   if (!demux->running) {
     GST_DEBUG_OBJECT (demux, "Not exposing pads due to shutdown");
     return TRUE;
+  }
+
+  /* re-order streams : video, then audio, then others */
+  demux->next_streams =
+      g_list_sort (demux->next_streams, (GCompareFunc) sort_streams);
+
+  collection = gst_stream_collection_new ("adaptivedemux");
+  for (iter = demux->next_streams; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxStream *stream = iter->data;
+    gst_stream_collection_add_stream (collection,
+        gst_object_ref (GST_OBJECT (stream->stream_object)));
+  }
+
+#ifndef GST_DISABLE_GST_DEBUG
+  /* Just some debugging */
+  /* NOTE: depending on streaming protocol,
+   * some stream information could be unknown until prerolled */
+  GST_DEBUG_OBJECT (demux, "Add %d streams to colleciton",
+      gst_stream_collection_get_size (collection));
+  for (i = 0; i < gst_stream_collection_get_size (collection); i++) {
+    GstStream *stream = gst_stream_collection_get_stream (collection, i);
+    GstTagList *taglist;
+    GstCaps *caps;
+    const gchar *type =
+        gst_stream_type_get_name (gst_stream_get_stream_type (stream));
+
+    GST_DEBUG_OBJECT (demux, "   Stream '%s'",
+        gst_stream_get_stream_id (stream));
+    GST_DEBUG_OBJECT (demux, "     type  : %s", type ? type : "unknown");
+    GST_DEBUG_OBJECT (demux, "     flags : 0x%x",
+        gst_stream_get_stream_flags (stream));
+    taglist = gst_stream_get_tags (stream);
+    GST_DEBUG_OBJECT (demux, "     tags  : %" GST_PTR_FORMAT, taglist);
+    caps = gst_stream_get_caps (stream);
+    GST_DEBUG_OBJECT (demux, "     caps  : %" GST_PTR_FORMAT, caps);
+    if (taglist)
+      gst_tag_list_unref (taglist);
+    if (caps)
+      gst_caps_unref (caps);
+  }
+#endif
+
+  gst_object_replace ((GstObject **) & demux->priv->collection,
+      (GstObject *) collection);
+
+  if (demux->streams_aware) {
+    gst_adaptive_demux_update_requested_selection (demux);
+    GST_MANIFEST_UNLOCK (demux);
+    gst_element_post_message (GST_ELEMENT (demux),
+        gst_message_new_stream_collection (GST_OBJECT (demux),
+            demux->priv->collection));
+    GST_MANIFEST_LOCK (demux);
   }
 
   for (iter = demux->next_streams; iter; iter = g_list_next (iter)) {
@@ -1538,6 +1810,61 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
   return TRUE;
 }
 
+/* Returns SELECTED_STREAMS message if active_selection is equal to
+ * requested_selection, else NULL.
+ * Must be called with LOCK taken */
+static GstMessage *
+gst_adaptive_demux_is_selection_done (GstAdaptiveDemux * demux)
+{
+  GList *iter;
+  GstMessage *msg;
+
+  if (!demux->priv->selection_updated)
+    return NULL;
+
+  GST_LOG_OBJECT (demux, "Checking");
+
+  if (g_list_length (demux->priv->requested_selection) !=
+      g_list_length (demux->priv->active_selection)) {
+    GST_DEBUG_OBJECT (demux, "Still have streams to activate");
+    return NULL;
+  }
+
+  for (iter = demux->priv->requested_selection; iter; iter = g_list_next (iter)) {
+    GST_DEBUG_OBJECT (demux, "Checking requested stream %s",
+        (gchar *) iter->data);
+    if (!stream_in_list (demux->priv->active_selection, (gchar *) iter->data)) {
+      GST_DEBUG_OBJECT (demux, "Not in active selection, returning");
+      return NULL;
+    }
+  }
+
+  GST_DEBUG_OBJECT (demux, "Selection active, creating message");
+
+  /* We are completely active */
+  msg =
+      gst_message_new_streams_selected ((GstObject *) demux,
+      demux->priv->collection);
+  GST_MESSAGE_SEQNUM (msg) = demux->priv->select_streams_seqnum;
+  for (iter = demux->priv->slots; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxOutputSlot *slot =
+        (GstAdaptiveDemuxOutputSlot *) iter->data;
+    GstAdaptiveDemuxStream *stream;
+
+    if (!slot->active_stream)
+      continue;
+
+    stream = slot->active_stream;
+
+    GST_DEBUG_OBJECT (demux, "Adding stream %s",
+        gst_stream_get_stream_id (stream->stream_object));
+
+    gst_message_streams_selected_add (msg, stream->stream_object);
+  }
+  demux->priv->selection_updated = FALSE;
+  return msg;
+}
+
 static GstPadProbeReturn
 gst_adaptive_demux_stream_src_probe (GstPad * pad, GstPadProbeInfo * info,
     GstAdaptiveDemuxStream * stream)
@@ -1549,17 +1876,18 @@ gst_adaptive_demux_stream_src_probe (GstPad * pad, GstPadProbeInfo * info,
     case GST_EVENT_CAPS:
     {
       GstAdaptiveDemuxOutputSlot *slot, *to_free = NULL;
+      GstMessage *msg = NULL;
 
       GST_MANIFEST_LOCK (demux);
       if (stream->slot == NULL) {
         GST_LOG_OBJECT (pad, "Stream %p has no slot", stream);
         GST_MANIFEST_UNLOCK (demux);
-        return GST_PAD_PROBE_OK;
+        break;
       } else if (stream->slot && stream->slot->active_stream == stream) {
         GST_LOG_OBJECT (pad, "Stream %p is linked with slot %p %"
             GST_PTR_FORMAT, stream, stream->slot, stream->slot->src_pad);
         GST_MANIFEST_UNLOCK (demux);
-        return GST_PAD_PROBE_OK;
+        break;
       }
 
       slot = stream->slot;
@@ -1599,6 +1927,7 @@ gst_adaptive_demux_stream_src_probe (GstPad * pad, GstPadProbeInfo * info,
 
       GST_DEBUG_OBJECT (slot->src_pad, "Expose slot");
       gst_adaptive_demux_slot_expose (slot);
+      msg = gst_adaptive_demux_is_selection_done (demux);
       GST_MANIFEST_UNLOCK (demux);
 
       if (to_free) {
@@ -1607,6 +1936,36 @@ gst_adaptive_demux_stream_src_probe (GstPad * pad, GstPadProbeInfo * info,
         gst_adaptive_demux_slot_free (to_free);
         GST_MANIFEST_UNLOCK (demux);
       }
+
+      if (msg)
+        gst_element_post_message (GST_ELEMENT (demux), msg);
+    }
+      break;
+    case GST_EVENT_EOS:{
+      GstMessage *msg = NULL;
+      const gchar *sid;
+      GstAdaptiveDemuxOutputSlot *slot;
+
+      if (stream->slot == NULL)
+        break;
+
+      slot = stream->slot;
+      sid = gst_stream_get_stream_id (stream->stream_object);
+
+      if (!stream_in_list (demux->priv->requested_selection, sid)) {
+        GST_DEBUG_OBJECT (stream->pad, "Remove slot for unselected stream");
+        gst_pad_push_event (slot->src_pad, gst_event_new_eos ());
+        GST_MANIFEST_LOCK (demux);
+        stream->slot = NULL;
+        gst_adaptive_demux_slot_unlink (slot);
+        demux->priv->slots = g_list_remove (demux->priv->slots, slot);
+        gst_adaptive_demux_slot_free (slot);
+        msg = gst_adaptive_demux_is_selection_done (demux);
+        GST_MANIFEST_UNLOCK (demux);
+      }
+
+      if (msg)
+        gst_element_post_message (GST_ELEMENT (demux), msg);
     }
       break;
     default:
@@ -2342,6 +2701,216 @@ gst_adaptive_demux_src_query (GstPad * pad, GstObject * parent,
   return ret;
 }
 
+/* STREAMS-AWARE */
+static GstAdaptiveDemuxStream *
+gst_adaptive_demux_find_stream_for_stream_id (GstAdaptiveDemux * demux,
+    const gchar * sid)
+{
+  GList *iter;
+
+  for (iter = demux->streams; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxStream *stream = (GstAdaptiveDemuxStream *) iter->data;
+    const gchar *stream_id;
+
+    stream_id = gst_stream_get_stream_id (stream->stream_object);
+
+    if (!g_strcmp0 (sid, stream_id))
+      return stream;
+  }
+
+  return NULL;
+}
+
+static const gchar *
+stream_in_collection (GstAdaptiveDemux * demux, gchar * sid)
+{
+  guint i, len;
+
+  if (demux->priv->collection == NULL)
+    return NULL;
+
+  len = gst_stream_collection_get_size (demux->priv->collection);
+  for (i = 0; i < len; i++) {
+    GstStream *stream =
+        gst_stream_collection_get_stream (demux->priv->collection, i);
+    const gchar *osid = gst_stream_get_stream_id (stream);
+    if (!g_strcmp0 (sid, osid))
+      return osid;
+  }
+
+  return NULL;
+}
+
+static gboolean
+gst_adaptive_demux_handle_select_streams_event (GstAdaptiveDemux * demux,
+    GstEvent * event)
+{
+  GList *iter;
+  /* List of slots to (de)activate. */
+  GList *to_deactivate = NULL;
+  GList *to_activate = NULL;
+
+  GList *unknown = NULL;
+  GList *to_reassign = NULL;
+  GList *future_request_streams = NULL;
+  GList *pending_streams = NULL;
+  GList *stream_to_reassign = NULL;
+
+  GList *select_streams = NULL;
+  guint32 seqnum = gst_event_get_seqnum (event);
+
+  GST_INFO_OBJECT (demux, "Received select-streams event");
+
+  demux->priv->select_streams_seqnum = seqnum;
+
+  gst_event_parse_select_streams (event, &select_streams);
+  gst_event_unref (event);
+
+  if (demux->priv->pending_select_streams) {
+    GST_DEBUG_OBJECT (demux, "Update pending select stream");
+    g_list_free_full (demux->priv->pending_select_streams, g_free);
+    demux->priv->pending_select_streams = NULL;
+  }
+
+  /* COMPARE the requested streams to the active and requested streams
+   * on multiqueue. */
+
+  /* First check the stream to activate and which ones are unknown */
+  for (iter = select_streams; iter; iter = g_list_next (iter)) {
+    const gchar *sid = (const gchar *) iter->data;
+    GstAdaptiveDemuxStream *stream;
+    GST_DEBUG_OBJECT (demux, "Checking stream '%s'", sid);
+    stream = gst_adaptive_demux_find_stream_for_stream_id (demux, sid);
+    /* Find the corresponding stream */
+    if (stream == NULL) {
+      if (stream_in_collection (demux, (gchar *) sid)) {
+        pending_streams = g_list_append (pending_streams, (gchar *) sid);
+      } else {
+        GST_DEBUG_OBJECT (demux, "We don't have a stream for '%s'", sid);
+        unknown = g_list_append (unknown, (gchar *) sid);
+      }
+    } else if (stream->slot == NULL) {
+      GST_DEBUG_OBJECT (demux, "We need to activate slot for stream '%s'", sid);
+      to_activate = g_list_append (to_activate, stream);
+    } else {
+      GST_DEBUG_OBJECT (demux,
+          "Stream '%s' is already active on slot %p", sid, stream->slot);
+      future_request_streams =
+          g_list_append (future_request_streams, (gchar *) sid);
+    }
+  }
+
+  for (iter = demux->streams; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxStream *stream = (GstAdaptiveDemuxStream *) iter->data;
+    /* For streams that have an slot, check if it's part of the streams to
+     * be active */
+    if (stream->slot && !stream_in_list (select_streams,
+            gst_stream_get_stream_id (stream->stream_object))) {
+      GST_DEBUG_OBJECT (demux,
+          "Stream %p (%s) should be deactivated, no longer used", stream,
+          gst_stream_get_stream_id (stream->stream_object));
+      to_deactivate = g_list_append (to_deactivate, stream);
+    }
+  }
+
+  /* The only streams left to activate are the ones that won't be reassigned and
+   * therefore really need to have a new output created */
+  for (iter = to_activate; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxStream *stream = (GstAdaptiveDemuxStream *) iter->data;
+    future_request_streams = g_list_append (future_request_streams,
+        (gchar *) gst_stream_get_stream_id (stream->stream_object));
+  }
+
+  if (to_activate == NULL && pending_streams != NULL) {
+    GST_DEBUG_OBJECT (demux, "Stream switch requested for non-exposed streams");
+    if (demux->priv->requested_selection)
+      g_list_free_full (demux->priv->requested_selection, g_free);
+    demux->priv->requested_selection =
+        g_list_copy_deep (select_streams, (GCopyFunc) g_strdup, NULL);
+    g_list_free (to_deactivate);
+    g_list_free (pending_streams);
+    to_deactivate = NULL;
+    pending_streams = NULL;
+  } else {
+    if (demux->priv->requested_selection)
+      g_list_free_full (demux->priv->requested_selection, g_free);
+    demux->priv->requested_selection =
+        g_list_copy_deep (future_request_streams, (GCopyFunc) g_strdup, NULL);
+    demux->priv->requested_selection =
+        g_list_concat (demux->priv->requested_selection,
+        g_list_copy_deep (pending_streams, (GCopyFunc) g_strdup, NULL));
+  }
+
+  demux->priv->selection_updated = TRUE;
+
+  if (unknown) {
+    GST_FIXME_OBJECT (demux, "Got request for an unknown stream");
+    g_list_free (unknown);
+  }
+
+  for (iter = to_activate; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxStream *stream = (GstAdaptiveDemuxStream *) iter->data;
+    GstAdaptiveDemuxOutputSlot *slot = gst_adaptive_demux_create_slot (demux,
+        gst_stream_get_stream_type (stream->stream_object));
+
+    demux->priv->slots = g_list_append (demux->priv->slots, slot);
+    gst_adaptive_demux_slot_link (slot, stream);
+
+    stream->cancelled = FALSE;
+    stream->replaced = FALSE;
+    stream->last_ret = GST_FLOW_OK;
+    stream->restart_download = TRUE;
+    stream->need_header = TRUE;
+    stream->discont = TRUE;
+    GST_DEBUG_OBJECT (stream->pad, "Restarting download loop");
+    gst_task_start (stream->download_task);
+  }
+
+  if (to_deactivate)
+    g_list_free (to_deactivate);
+  if (to_activate)
+    g_list_free (to_activate);
+  if (to_reassign)
+    g_list_free (to_reassign);
+  if (future_request_streams)
+    g_list_free (future_request_streams);
+  if (pending_streams)
+    g_list_free (pending_streams);
+  if (stream_to_reassign)
+    g_list_free (stream_to_reassign);
+
+  return TRUE;
+}
+
+static gboolean
+gst_adaptive_demux_send_event (GstElement * element, GstEvent * event)
+{
+  GstAdaptiveDemux *demux = GST_ADAPTIVE_DEMUX_CAST (element);
+
+  GST_DEBUG_OBJECT (demux, "event %s", GST_EVENT_TYPE_NAME (event));
+  if (GST_EVENT_TYPE (event) == GST_EVENT_SELECT_STREAMS &&
+      demux->streams_aware) {
+    guint32 seqnum = gst_event_get_seqnum (event);
+    gboolean ret;
+
+    GST_MANIFEST_LOCK (demux);
+    if (seqnum == demux->priv->select_streams_seqnum) {
+      GST_MANIFEST_UNLOCK (demux);
+      GST_LOG_OBJECT (demux, "Drop duplicated SELECT_STREAMS event seqnum %"
+          G_GUINT32_FORMAT, seqnum);
+      gst_event_unref (event);
+      return TRUE;
+    }
+
+    ret = gst_adaptive_demux_handle_select_streams_event (demux, event);
+    GST_MANIFEST_UNLOCK (demux);
+
+    return ret;
+  }
+
+  return GST_ELEMENT_CLASS (parent_class)->send_event (element, event);
+}
+
 /* must be called with manifest_lock taken */
 static void
 gst_adaptive_demux_start_tasks (GstAdaptiveDemux * demux)
@@ -2357,6 +2926,12 @@ gst_adaptive_demux_start_tasks (GstAdaptiveDemux * demux)
 
   for (iter = demux->streams; iter; iter = g_list_next (iter)) {
     GstAdaptiveDemuxStream *stream = iter->data;
+
+    if (stream->slot == NULL) {
+      GST_DEBUG_OBJECT (stream->pad,
+          "Skip starting task for unselected stream");
+      continue;
+    }
 
     g_mutex_lock (&stream->fragment_download_lock);
     stream->cancelled = FALSE;
@@ -2987,13 +3562,15 @@ _src_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
           gst_flow_get_name (ret));
     }
 
-    if (ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_SWITCH) {
+    if (ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_SWITCH ||
+        ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_UNSELECTED) {
       ret = GST_FLOW_EOS;       /* return EOS to make the source stop */
     } else if (ret == GST_ADAPTIVE_DEMUX_FLOW_END_OF_FRAGMENT) {
       /* Behaves like an EOS event from upstream */
       stream->fragment.finished = TRUE;
       ret = klass->finish_fragment (demux, stream);
-      if (ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_SWITCH) {
+      if (ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_SWITCH ||
+          ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_UNSELECTED) {
         ret = GST_FLOW_EOS;     /* return EOS to make the source stop */
       } else if (ret != GST_FLOW_OK) {
         goto error;
@@ -4162,6 +4739,7 @@ gst_adaptive_demux_stream_download_loop (GstAdaptiveDemuxStream * stream)
     }
       break;
 
+
     default:
       if (ret <= GST_FLOW_ERROR) {
         gboolean is_live = gst_adaptive_demux_is_live (demux);
@@ -4221,6 +4799,14 @@ gst_adaptive_demux_stream_download_loop (GstAdaptiveDemuxStream * stream)
           GST_DEBUG_OBJECT (demux, "Updated the playlist");
         }
         goto end;
+      } else if (ret == (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_UNSELECTED) {
+        GST_DEBUG_OBJECT (demux, "Stop taks for unselected stream");
+        gst_task_stop (stream->download_task);
+        stream->last_ret = GST_FLOW_NOT_LINKED;
+        ret = gst_adaptive_demux_combine_flows (demux);
+        GST_MANIFEST_UNLOCK (demux);
+        gst_pad_push_event (stream->pad, gst_event_new_eos ());
+        GST_MANIFEST_LOCK (demux);
       }
       break;
   }
@@ -4569,7 +5155,7 @@ gst_adaptive_demux_stream_advance_fragment_unlocked (GstAdaptiveDemux * demux,
         if (other != stream) {
           g_mutex_lock (&other->fragment_download_lock);
           can_expose &= (other->cancelled == TRUE
-              || other->download_finished == TRUE);
+              || other->download_finished == TRUE || other->slot == NULL);
           g_mutex_unlock (&other->fragment_download_lock);
         }
       }
@@ -4582,6 +5168,14 @@ gst_adaptive_demux_stream_advance_fragment_unlocked (GstAdaptiveDemux * demux,
         gst_adaptive_demux_start_tasks (demux);
       } else {
         GST_LOG_OBJECT (demux, "Not switching yet - ongoing downloads");
+      }
+    } else if (G_UNLIKELY (demux->priv->selection_updated)) {
+      const gchar *sid = gst_stream_get_stream_id (stream->stream_object);
+
+      if (!stream_in_list (demux->priv->requested_selection, sid)) {
+        GST_DEBUG_OBJECT (stream->pad,
+            "Stop task for unselected stream %s", sid);
+        ret = (GstFlowReturn) GST_ADAPTIVE_DEMUX_FLOW_UNSELECTED;
       }
     }
   }

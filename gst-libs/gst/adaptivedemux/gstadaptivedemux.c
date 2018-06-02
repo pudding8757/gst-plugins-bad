@@ -1028,6 +1028,17 @@ gst_adaptive_demux_create_slot (GstAdaptiveDemux * demux, GstStreamType type)
 }
 
 static gboolean
+gst_adaptive_demux_copy_sticky_event_to_slot (GstPad * pad, GstEvent ** event,
+    GstAdaptiveDemuxOutputSlot * slot)
+{
+  GST_LOG_OBJECT (pad, "Copy sticky event %s to %" GST_PTR_FORMAT,
+      GST_EVENT_TYPE_NAME (*event), slot->src_pad);
+  gst_pad_store_sticky_event (slot->src_pad, *event);
+
+  return TRUE;
+}
+
+static gboolean
 gst_adaptive_demux_slot_link (GstAdaptiveDemuxOutputSlot * slot,
     GstAdaptiveDemuxStream * stream)
 {
@@ -1057,12 +1068,37 @@ gst_adaptive_demux_slot_expose (GstAdaptiveDemuxOutputSlot * slot)
 
   /* Don't hold the manifest lock while exposing a pad */
   if (!slot->exposed) {
+    GstAdaptiveDemuxStream *stream = slot->active_stream;
+
+    gst_pad_sticky_events_foreach (stream->pad,
+        (GstPadStickyEventsForeachFunction)
+        gst_adaptive_demux_copy_sticky_event_to_slot, slot);
+
+    GST_DEBUG_OBJECT (slot->src_pad, "Expose slot");
     GST_MANIFEST_UNLOCK (slot->demux);
     ret = gst_element_add_pad (GST_ELEMENT_CAST (slot->demux), slot->src_pad);
     GST_MANIFEST_LOCK (slot->demux);
 
     slot->exposed = TRUE;
   }
+
+  return ret;
+}
+
+static gboolean
+gst_adaptive_demux_slot_unlink (GstAdaptiveDemuxOutputSlot * slot)
+{
+  gboolean ret = TRUE;
+
+  if (!gst_ghost_pad_set_target ((GstGhostPad *) slot->src_pad, NULL)) {
+    GST_ERROR_OBJECT (slot->src_pad, "Could not unset target pad");
+    ret = FALSE;
+  }
+
+  if (slot->active_stream)
+    slot->active_stream->slot = NULL;
+
+  slot->active_stream = NULL;
 
   return ret;
 }
@@ -1081,6 +1117,67 @@ gst_adaptive_demux_slot_free (GstAdaptiveDemuxOutputSlot * slot)
   g_free (slot);
 }
 
+static GstAdaptiveDemuxOutputSlot *
+gst_adaptive_demux_find_free_compatible_slot (GstAdaptiveDemuxStream * stream)
+{
+  GList *iter;
+  GstAdaptiveDemuxOutputSlot *ret = NULL;
+  GstCaps *caps;
+  GstStreamType type;
+  const gchar *name = NULL;
+  GstCaps *other_caps = NULL;
+  GstAdaptiveDemux *demux = stream->demux;
+
+  if (!demux->priv->slots)
+    return NULL;
+
+  type = gst_stream_get_stream_type (stream->stream_object);
+  caps = gst_stream_get_caps (stream->stream_object);
+
+  if (caps) {
+    const GstStructure *str = gst_caps_get_structure (caps, 0);
+    name = gst_structure_get_name (str);
+  }
+
+  for (iter = demux->priv->slots; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxOutputSlot *slot =
+        (GstAdaptiveDemuxOutputSlot *) iter->data;
+    const GstStructure *other_str;
+
+    /* This slot will be used for other stream */
+    if (slot->pending_stream)
+      continue;
+
+    if (type != slot->type)
+      continue;
+
+    other_caps = gst_pad_get_current_caps (slot->src_pad);
+
+    if (!caps || !other_caps ||
+        gst_caps_is_any (caps) || gst_caps_is_any (other_caps)) {
+      ret = slot;
+      break;
+    }
+
+    other_str = gst_caps_get_structure (other_caps, 0);
+
+    if (!g_strcmp0 (name, gst_structure_get_name (other_str))) {
+      ret = slot;
+      break;
+    }
+
+    gst_caps_unref (other_caps);
+    other_caps = NULL;
+  }
+
+  if (caps)
+    gst_caps_unref (caps);
+  if (other_caps)
+    gst_caps_unref (other_caps);
+
+  return ret;
+}
+
 static gboolean
 gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
     GstAdaptiveDemuxStream * stream)
@@ -1089,6 +1186,7 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
   GstCaps *caps;
   GstStream *stream_obj = stream->stream_object;
   GstAdaptiveDemuxOutputSlot *slot;
+  gboolean ret = TRUE;
 
   caps = gst_stream_get_caps (stream_obj);
   if (stream->pending_caps) {
@@ -1098,18 +1196,52 @@ gst_adaptive_demux_expose_stream (GstAdaptiveDemux * demux,
 
   GST_DEBUG_OBJECT (demux, "Exposing srcpad %s:%s with caps %" GST_PTR_FORMAT,
       GST_DEBUG_PAD_NAME (pad), caps);
-  if (caps)
-    gst_caps_unref (caps);
+
+  /* Reuse output slot if possible */
+  if (demux->streams_aware) {
+    slot = gst_adaptive_demux_find_free_compatible_slot (stream);
+
+    if (slot) {
+      gst_adaptive_demux_slot_unlink (slot);
+      if (!gst_adaptive_demux_slot_link (slot, stream)) {
+        ret = FALSE;
+        goto beach;
+      }
+
+      if (caps && !gst_caps_is_any (caps)) {
+        GST_DEBUG_OBJECT (stream->pad, "Reuse existing slot %p", slot);
+        ret = gst_adaptive_demux_slot_expose (slot);
+      } else {
+        GST_DEBUG_OBJECT (stream->pad, "Unknown stream caps, link them later");
+      }
+    } else {
+      slot = gst_adaptive_demux_create_slot (demux,
+          gst_stream_get_stream_type (stream_obj));
+
+      demux->priv->slots = g_list_append (demux->priv->slots, slot);
+      ret = gst_adaptive_demux_slot_link (slot, stream);
+    }
+
+    goto beach;
+  }
 
   slot = gst_adaptive_demux_create_slot (demux,
       gst_stream_get_stream_type (stream_obj));
 
   demux->priv->slots = g_list_append (demux->priv->slots, slot);
 
-  if (!gst_adaptive_demux_slot_link (slot, stream))
-    return FALSE;
+  if (!gst_adaptive_demux_slot_link (slot, stream)) {
+    ret = FALSE;
+    goto beach;
+  }
 
-  return gst_adaptive_demux_slot_expose (slot);
+  ret = gst_adaptive_demux_slot_expose (slot);
+
+beach:
+  if (caps)
+    gst_caps_unref (caps);
+
+  return ret;
 }
 
 /* must be called with manifest_lock taken */
@@ -1320,6 +1452,13 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
   demux->streams = demux->next_streams;
   demux->next_streams = NULL;
 
+  /* Clear pending streams to update them in _expose_stream() */
+  for (iter = demux->priv->slots; iter; iter = g_list_next (iter)) {
+    GstAdaptiveDemuxOutputSlot *slot =
+        (GstAdaptiveDemuxOutputSlot *) iter->data;
+    slot->pending_stream = NULL;
+  }
+
   for (iter = demux->streams; iter; iter = g_list_next (iter)) {
     GstAdaptiveDemuxStream *stream = iter->data;
 
@@ -1329,9 +1468,11 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
     }
   }
 
-  GST_MANIFEST_UNLOCK (demux);
-  gst_element_no_more_pads (GST_ELEMENT_CAST (demux));
-  GST_MANIFEST_LOCK (demux);
+  if (!demux->streams_aware) {
+    GST_MANIFEST_UNLOCK (demux);
+    gst_element_no_more_pads (GST_ELEMENT_CAST (demux));
+    GST_MANIFEST_LOCK (demux);
+  }
 
   if (old_streams) {
     GstEvent *eos = gst_event_new_eos ();
@@ -1397,6 +1538,95 @@ gst_adaptive_demux_expose_streams (GstAdaptiveDemux * demux)
   return TRUE;
 }
 
+static GstPadProbeReturn
+gst_adaptive_demux_stream_src_probe (GstPad * pad, GstPadProbeInfo * info,
+    GstAdaptiveDemuxStream * stream)
+{
+  GstAdaptiveDemux *demux = stream->demux;
+  GstEvent *event = GST_PAD_PROBE_INFO_EVENT (info);
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_CAPS:
+    {
+      GstAdaptiveDemuxOutputSlot *slot;
+      GList *to_free = NULL;
+
+      GST_MANIFEST_LOCK (demux);
+      if (stream->slot == NULL) {
+        GST_LOG_OBJECT (pad, "Stream %p has no slot", stream);
+        GST_MANIFEST_UNLOCK (demux);
+        return GST_PAD_PROBE_OK;
+      } else if (stream->slot && stream->slot->active_stream == stream) {
+        GST_LOG_OBJECT (pad, "Stream %p is linked with slot %p %"
+            GST_PTR_FORMAT, stream, stream->slot, stream->slot->src_pad);
+        GST_MANIFEST_UNLOCK (demux);
+        return GST_PAD_PROBE_OK;
+      }
+
+      slot = stream->slot;
+
+      if (slot->exposed) {
+        GstCaps *caps, *other_caps;
+        const GstStructure *str, *other_str;
+
+        caps = gst_stream_get_caps (stream->stream_object);
+        str = gst_caps_get_structure (caps, 0);
+
+        other_caps = gst_pad_get_current_caps (slot->src_pad);
+        other_str = gst_caps_get_structure (other_caps, 0);
+
+        if (g_strcmp0 (gst_structure_get_name (str),
+                gst_structure_get_name (other_str)) != 0) {
+          GstAdaptiveDemuxOutputSlot *to_free_slot =
+              (GstAdaptiveDemuxOutputSlot *) to_free->data;
+
+          GST_DEBUG_OBJECT (pad, "Cannot reuse slot %p %" GST_PTR_FORMAT
+              ", create new one", slot, slot->src_pad);
+
+          to_free = g_list_find (demux->priv->slots, slot);
+          gst_adaptive_demux_slot_unlink (to_free_slot);
+
+          slot = gst_adaptive_demux_create_slot (demux,
+              gst_stream_get_stream_type (stream->stream_object));
+
+          /* Preserve linked list order */
+          demux->priv->slots =
+              g_list_insert_before (demux->priv->slots, to_free, slot);
+          demux->priv->slots = g_list_remove_link (demux->priv->slots, to_free);
+
+          gst_adaptive_demux_slot_link (slot, stream);
+        } else {
+          GST_DEBUG_OBJECT (pad, "Reuse slot %p %" GST_PTR_FORMAT,
+              slot, slot->src_pad);
+        }
+
+        gst_caps_unref (caps);
+        gst_caps_unref (other_caps);
+      }
+
+      GST_DEBUG_OBJECT (slot->src_pad, "Expose slot");
+      gst_adaptive_demux_slot_expose (slot);
+      GST_MANIFEST_UNLOCK (demux);
+
+      if (to_free) {
+        GstAdaptiveDemuxOutputSlot *to_free_slot =
+            (GstAdaptiveDemuxOutputSlot *) to_free->data;
+
+        gst_pad_push_event (to_free_slot->src_pad, gst_event_new_eos ());
+        GST_MANIFEST_LOCK (demux);
+        g_list_free_full (to_free,
+            (GDestroyNotify) gst_adaptive_demux_slot_free);
+        GST_MANIFEST_UNLOCK (demux);
+      }
+    }
+      break;
+    default:
+      break;
+  }
+
+  return GST_PAD_PROBE_OK;
+}
+
 /* must be called with manifest_lock taken */
 GstAdaptiveDemuxStream *
 gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
@@ -1437,6 +1667,11 @@ gst_adaptive_demux_stream_new (GstAdaptiveDemux * demux, GstPad * pad)
   g_free (stream_id);
 
   demux->next_streams = g_list_append (demux->next_streams, stream);
+
+  if (demux->streams_aware)
+    gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        (GstPadProbeCallback) gst_adaptive_demux_stream_src_probe, stream,
+        NULL);
 
   return stream;
 }

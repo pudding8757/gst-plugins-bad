@@ -2,6 +2,7 @@ rtmp_sources = [
   'gstrtmp.c',
   'gstrtmpsink.c',
   'gstrtmpsrc.c',
+  'gstrtmpserversrc.c',
 ]
 
 rtmp_dep = dependency('librtmp', required : false)

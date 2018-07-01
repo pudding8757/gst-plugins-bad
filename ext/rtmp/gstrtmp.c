@@ -33,6 +33,7 @@
 
 #include "gstrtmpsrc.h"
 #include "gstrtmpsink.h"
+#include "gstrtmpserversrc.h"
 
 #ifndef GST_DISABLE_GST_DEBUG
 GST_DEBUG_CATEGORY_STATIC (rtmp_debug);
@@ -112,6 +113,8 @@ plugin_init (GstPlugin * plugin)
       GST_TYPE_RTMP_SRC);
   ret &= gst_element_register (plugin, "rtmpsink", GST_RANK_PRIMARY,
       GST_TYPE_RTMP_SINK);
+  ret &= gst_element_register (plugin, "rtmpserversrc", GST_RANK_PRIMARY,
+      GST_TYPE_RTMP_SERVER_SRC);
 
   return ret;
 }

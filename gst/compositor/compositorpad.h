@@ -53,6 +53,8 @@ struct _GstCompositorPad
   gint width, height;
   gdouble alpha;
   gdouble crossfade;
+  gint crop_left, crop_right;
+  gint crop_top, crop_bottom;
 
   gboolean crossfaded;
 };

@@ -129,6 +129,10 @@ static void gst_compositor_child_proxy_init (gpointer g_iface,
 #define DEFAULT_PAD_HEIGHT 0
 #define DEFAULT_PAD_ALPHA  1.0
 #define DEFAULT_PAD_CROSSFADE_RATIO  -1.0
+#define DEFAULT_PAD_CROP_LEFT   0
+#define DEFAULT_PAD_CROP_RIGHT  0
+#define DEFAULT_PAD_CROP_TOP    0
+#define DEFAULT_PAD_CROP_BOTTOM 0
 enum
 {
   PROP_PAD_0,
@@ -138,6 +142,10 @@ enum
   PROP_PAD_HEIGHT,
   PROP_PAD_ALPHA,
   PROP_PAD_CROSSFADE_RATIO,
+  PROP_PAD_CROP_LEFT,
+  PROP_PAD_CROP_RIGHT,
+  PROP_PAD_CROP_TOP,
+  PROP_PAD_CROP_BOTTOM
 };
 
 G_DEFINE_TYPE (GstCompositorPad, gst_compositor_pad,
@@ -168,6 +176,18 @@ gst_compositor_pad_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_CROSSFADE_RATIO:
       g_value_set_double (value, pad->crossfade);
+      break;
+    case PROP_PAD_CROP_LEFT:
+      g_value_set_int (value, pad->crop_left);
+      break;
+    case PROP_PAD_CROP_RIGHT:
+      g_value_set_int (value, pad->crop_right);
+      break;
+    case PROP_PAD_CROP_TOP:
+      g_value_set_int (value, pad->crop_top);
+      break;
+    case PROP_PAD_CROP_BOTTOM:
+      g_value_set_int (value, pad->crop_bottom);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -207,6 +227,26 @@ gst_compositor_pad_set_property (GObject * object, guint prop_id,
       pad->crossfade = g_value_get_double (value);
       gst_video_aggregator_pad_set_needs_alpha (GST_VIDEO_AGGREGATOR_PAD (pad),
           pad->crossfade >= 0.0f);
+      break;
+    case PROP_PAD_CROP_LEFT:
+      pad->crop_left = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
+      break;
+    case PROP_PAD_CROP_RIGHT:
+      pad->crop_right = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
+      break;
+    case PROP_PAD_CROP_TOP:
+      pad->crop_top = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
+      break;
+    case PROP_PAD_CROP_BOTTOM:
+      pad->crop_bottom = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -479,6 +519,23 @@ gst_compositor_pad_class_init (GstCompositorPadClass * klass)
           "A value inferior to 0 means no crossfading.",
           -1.0, 1.0, DEFAULT_PAD_CROSSFADE_RATIO,
           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_CROP_LEFT,
+      g_param_spec_int ("crop-left", "Crop Left", "Pixels to crop at left",
+          0, G_MAXINT, DEFAULT_PAD_CROP_LEFT,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_CROP_RIGHT,
+      g_param_spec_int ("crop-right", "Crop Right", "Pixels to crop at right",
+          0, G_MAXINT, DEFAULT_PAD_CROP_RIGHT,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_CROP_TOP,
+      g_param_spec_int ("crop-top", "Crop Top", "Pixels to crop at top",
+          0, G_MAXINT, DEFAULT_PAD_CROP_TOP,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_PAD_CROP_BOTTOM,
+      g_param_spec_int ("crop-bottom", "Crop Bottom",
+          "Pixels to crop at bottom", 0, G_MAXINT, DEFAULT_PAD_CROP_BOTTOM,
+          G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+
 
   vaggpadclass->prepare_frame =
       GST_DEBUG_FUNCPTR (gst_compositor_pad_prepare_frame);

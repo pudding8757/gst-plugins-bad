@@ -149,6 +149,7 @@ gst_compositor_pad_get_property (GObject * object, guint prop_id,
 {
   GstCompositorPad *pad = GST_COMPOSITOR_PAD (object);
 
+  GST_OBJECT_LOCK (pad);
   switch (prop_id) {
     case PROP_PAD_XPOS:
       g_value_set_int (value, pad->xpos);
@@ -158,13 +159,9 @@ gst_compositor_pad_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_WIDTH:
       g_value_set_int (value, pad->width);
-      gst_video_aggregator_convert_pad_update_conversion_info
-          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
       break;
     case PROP_PAD_HEIGHT:
       g_value_set_int (value, pad->height);
-      gst_video_aggregator_convert_pad_update_conversion_info
-          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
       break;
     case PROP_PAD_ALPHA:
       g_value_set_double (value, pad->alpha);
@@ -176,6 +173,7 @@ gst_compositor_pad_get_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (pad);
 }
 
 static void
@@ -184,6 +182,7 @@ gst_compositor_pad_set_property (GObject * object, guint prop_id,
 {
   GstCompositorPad *pad = GST_COMPOSITOR_PAD (object);
 
+  GST_OBJECT_LOCK (pad);
   switch (prop_id) {
     case PROP_PAD_XPOS:
       pad->xpos = g_value_get_int (value);
@@ -193,9 +192,13 @@ gst_compositor_pad_set_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_WIDTH:
       pad->width = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
       break;
     case PROP_PAD_HEIGHT:
       pad->height = g_value_get_int (value);
+      gst_video_aggregator_convert_pad_update_conversion_info
+          (GST_VIDEO_AGGREGATOR_CONVERT_PAD (pad));
       break;
     case PROP_PAD_ALPHA:
       pad->alpha = g_value_get_double (value);
@@ -209,6 +212,7 @@ gst_compositor_pad_set_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (pad);
 }
 
 static void

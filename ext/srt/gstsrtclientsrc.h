@@ -40,10 +40,6 @@ typedef struct _GstSRTClientSrcClass GstSRTClientSrcClass;
 struct _GstSRTClientSrc {
   GstSRTBaseSrc parent;
 
-  SRTSOCKET sock;
-  gint poll_id;
-  gint poll_timeout;
-
   gboolean rendez_vous;
   gchar *bind_address;
   guint16 bind_port;

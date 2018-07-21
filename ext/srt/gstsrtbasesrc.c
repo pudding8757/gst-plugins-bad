@@ -24,7 +24,6 @@
 
 #include "gstsrtbasesrc.h"
 #include "gstsrt.h"
-#include <gio/gio.h>
 
 #define GST_CAT_DEFAULT gst_debug_srt_base_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
@@ -41,6 +40,9 @@ struct _GstSRTBaseSrcPrivate
   gint latency;
   gchar *passphrase;
   gint key_length;
+
+  GCancellable *cancellable;
+  int cancellable_fd;
 };
 
 #define GST_SRT_BASE_SRC_GET_PRIVATE(obj)  \
@@ -168,6 +170,8 @@ gst_srt_base_src_finalize (GObject * object)
     self->sock = SRT_INVALID_SOCK;
   }
 
+  g_object_unref (priv->cancellable);
+
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -230,6 +234,10 @@ gst_srt_base_src_start (GstBaseSrc * src)
   self->poll_id = poll_id;
 
   gst_uri_unref (uri);
+  /* HACK: Since srt_epoll_wait() is not cancellable, install our event fd to
+   * epoll */
+  priv->cancellable_fd = g_cancellable_get_fd (priv->cancellable);
+  srt_epoll_add_ssock (poll_id, priv->cancellable_fd, NULL);
 
   return TRUE;
 
@@ -250,6 +258,7 @@ static gboolean
 gst_srt_base_src_stop (GstBaseSrc * src)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcPrivate *priv = self->priv;
   GstSRTBaseSrcClass *bclass = GST_SRT_BASE_SRC_GET_CLASS (self);
 
   if (bclass->close)
@@ -258,6 +267,8 @@ gst_srt_base_src_stop (GstBaseSrc * src)
   if (self->poll_id != SRT_ERROR) {
     if (self->sock != SRT_INVALID_SOCK)
       srt_epoll_remove_usock (self->poll_id, self->sock);
+    if (priv->cancellable_fd != -1)
+      srt_epoll_remove_ssock (self->poll_id, priv->cancellable_fd);
     srt_epoll_release (self->poll_id);
   }
   self->poll_id = SRT_ERROR;
@@ -266,6 +277,30 @@ gst_srt_base_src_stop (GstBaseSrc * src)
   if (self->sock != SRT_INVALID_SOCK)
     srt_close (self->sock);
   self->sock = SRT_INVALID_SOCK;
+
+  return TRUE;
+}
+
+static gboolean
+gst_srt_base_src_unlock (GstBaseSrc * src)
+{
+  GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcPrivate *priv = self->priv;
+
+  GST_DEBUG_OBJECT (src, "Unlock");
+  g_cancellable_cancel (priv->cancellable);
+
+  return TRUE;
+}
+
+static gboolean
+gst_srt_base_src_unlock_stop (GstBaseSrc * src)
+{
+  GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcPrivate *priv = self->priv;
+
+  GST_DEBUG_OBJECT (src, "Unlock stop");
+  g_cancellable_reset (priv->cancellable);
 
   return TRUE;
 }
@@ -321,6 +356,9 @@ gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
   gstbasesrc_class->get_caps = GST_DEBUG_FUNCPTR (gst_srt_base_src_get_caps);
   gstbasesrc_class->start = GST_DEBUG_FUNCPTR (gst_srt_base_src_start);
   gstbasesrc_class->stop = GST_DEBUG_FUNCPTR (gst_srt_base_src_stop);
+  gstbasesrc_class->unlock = GST_DEBUG_FUNCPTR (gst_srt_base_src_unlock);
+  gstbasesrc_class->unlock_stop =
+      GST_DEBUG_FUNCPTR (gst_srt_base_src_unlock_stop);
 }
 
 static void
@@ -334,6 +372,8 @@ gst_srt_base_src_init (GstSRTBaseSrc * self)
 
   priv->latency = SRT_DEFAULT_LATENCY;
   priv->key_length = SRT_DEFAULT_KEY_LENGTH;
+  priv->cancellable = g_cancellable_new ();
+  priv->cancellable_fd = -1;
 
   self->priv = priv;
 
@@ -430,4 +470,12 @@ gst_srt_base_src_get_key_length (GstSRTBaseSrc * src)
   GstSRTBaseSrcPrivate *priv = src->priv;
 
   return priv->key_length;
+}
+
+gboolean
+gst_srt_base_src_is_cancelled (GstSRTBaseSrc * src)
+{
+  GstSRTBaseSrcPrivate *priv = src->priv;
+
+  return g_cancellable_is_cancelled (priv->cancellable);
 }

@@ -56,7 +56,6 @@ struct _GstSRTServerSrcPrivate
   gint poll_timeout;
 
   gboolean has_client;
-  gboolean cancelled;
 };
 
 #define GST_SRT_SERVER_SRC_GET_PRIVATE(obj)  \
@@ -133,36 +132,44 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
   GstSRTServerSrcPrivate *priv = self->priv;
-  GstFlowReturn ret = GST_FLOW_OK;
   GstMapInfo info;
   SRTSOCKET ready[2];
+  SYSSOCKET cancellable[2];
   gint recv_len;
   struct sockaddr client_sa;
   size_t client_sa_len;
 
+  if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+    goto cancelled;
+
   while (!priv->has_client) {
     GST_DEBUG_OBJECT (self, "poll wait (timeout: %d)", priv->poll_timeout);
 
+    if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+      goto cancelled;
+
     if (srt_epoll_wait (GST_SRT_BASE_SRC_POLL_ID (self), ready, &(int) {
-            2}, 0, 0, priv->poll_timeout, 0, 0, 0, 0) == -1) {
-      int srt_errno = srt_getlasterror (NULL);
+            2}, 0, 0, priv->poll_timeout, cancellable, &(int) {
+            2}, 0, 0) == -1) {
+      int srt_errno;
+
+      if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+        goto cancelled;
+
+      srt_errno = srt_getlasterror (NULL);
 
       /* Assuming that timeout error is normal */
       if (srt_errno != SRT_ETIMEOUT) {
         GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
             ("SRT error: %s", srt_getlasterror_str ()), (NULL));
-
         return GST_FLOW_ERROR;
-      }
-
-      /* Mimicking cancellable */
-      if (srt_errno == SRT_ETIMEOUT && priv->cancelled) {
-        GST_DEBUG_OBJECT (self, "Cancelled waiting for client");
-        return GST_FLOW_FLUSHING;
       }
 
       continue;
     }
+
+    if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+      goto cancelled;
 
     priv->client_sock =
         srt_accept (GST_SRT_BASE_SRC_SOCKET (self), &client_sa,
@@ -184,13 +191,15 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     }
   }
 
+  if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+    goto cancelled;
+
   GST_DEBUG_OBJECT (self, "filling buffer");
 
   if (!gst_buffer_map (outbuf, &info, GST_MAP_WRITE)) {
     GST_ELEMENT_ERROR (src, RESOURCE, WRITE,
         ("Could not map the output stream"), (NULL));
-    ret = GST_FLOW_ERROR;
-    goto out;
+    return GST_FLOW_ERROR;
   }
 
   recv_len = srt_recvmsg (priv->client_sock, (char *) info.data,
@@ -209,11 +218,9 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     g_clear_object (&priv->client_sockaddr);
     priv->has_client = FALSE;
     gst_buffer_resize (outbuf, 0, 0);
-    ret = GST_FLOW_OK;
-    goto out;
+    return GST_FLOW_OK;
   } else if (recv_len == 0) {
-    ret = GST_FLOW_EOS;
-    goto out;
+    return GST_FLOW_EOS;
   }
 
   GST_BUFFER_PTS (outbuf) =
@@ -231,8 +238,11 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
       GST_TIME_ARGS (GST_BUFFER_DURATION (outbuf)),
       GST_BUFFER_OFFSET (outbuf), GST_BUFFER_OFFSET_END (outbuf));
 
-out:
-  return ret;
+  return GST_FLOW_OK;
+
+cancelled:
+  GST_DEBUG_OBJECT (src, "Cancelled");
+  return GST_FLOW_FLUSHING;
 }
 
 static gboolean
@@ -289,30 +299,6 @@ gst_srt_server_src_close (GstSRTBaseSrc * src)
     priv->has_client = FALSE;
   }
 
-  priv->cancelled = FALSE;
-
-  return TRUE;
-}
-
-static gboolean
-gst_srt_server_src_unlock (GstBaseSrc * src)
-{
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = self->priv;
-
-  priv->cancelled = TRUE;
-
-  return TRUE;
-}
-
-static gboolean
-gst_srt_server_src_unlock_stop (GstBaseSrc * src)
-{
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = self->priv;
-
-  priv->cancelled = FALSE;
-
   return TRUE;
 }
 
@@ -321,7 +307,6 @@ gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
-  GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
   GstPushSrcClass *gstpushsrc_class = GST_PUSH_SRC_CLASS (klass);
   GstSRTBaseSrcClass *gstsrtbasesrc_class = GST_SRT_BASE_SRC_CLASS (klass);
 
@@ -377,10 +362,6 @@ gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
       "SRT Server source", "Source/Network",
       "Receive data over the network via SRT",
       "Justin Kim <justin.kim@collabora.com>");
-
-  gstbasesrc_class->unlock = GST_DEBUG_FUNCPTR (gst_srt_server_src_unlock);
-  gstbasesrc_class->unlock_stop =
-      GST_DEBUG_FUNCPTR (gst_srt_server_src_unlock_stop);
 
   gstpushsrc_class->fill = GST_DEBUG_FUNCPTR (gst_srt_server_src_fill);
 

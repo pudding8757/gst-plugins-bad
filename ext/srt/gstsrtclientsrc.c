@@ -153,29 +153,37 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (src);
   GstSRTClientSrcPrivate *priv = self->priv;
-  GstFlowReturn ret = GST_FLOW_OK;
   GstMapInfo info;
   SRTSOCKET ready[2];
+  SYSSOCKET cancellable[2];
   gint recv_len;
 
+  if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+    goto cancelled;
+
   if (srt_epoll_wait (GST_SRT_BASE_SRC_POLL_ID (self), 0, 0, ready, &(int) {
-          2}, priv->poll_timeout, 0, 0, 0, 0) == -1) {
+          2}, priv->poll_timeout, cancellable, &(int) {
+          2}, 0, 0) == -1) {
+    if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+      goto cancelled;
 
     /* Assuming that timeout error is normal */
     if (srt_getlasterror (NULL) != SRT_ETIMEOUT) {
       GST_ELEMENT_ERROR (src, RESOURCE, READ,
           (NULL), ("srt_epoll_wait error: %s", srt_getlasterror_str ()));
-      ret = GST_FLOW_ERROR;
+      return GST_FLOW_ERROR;
     }
     srt_clearlasterror ();
-    goto out;
+    return GST_FLOW_OK;
   }
+
+  if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
+    goto cancelled;
 
   if (!gst_buffer_map (outbuf, &info, GST_MAP_WRITE)) {
     GST_ELEMENT_ERROR (src, RESOURCE, READ,
         ("Could not map the buffer for writing "), (NULL));
-    ret = GST_FLOW_ERROR;
-    goto out;
+    return GST_FLOW_ERROR;
   }
 
   recv_len = srt_recvmsg (GST_SRT_BASE_SRC_SOCKET (self), (char *) info.data,
@@ -186,11 +194,9 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   if (recv_len == SRT_ERROR) {
     GST_ELEMENT_ERROR (src, RESOURCE, READ,
         (NULL), ("srt_recvmsg error: %s", srt_getlasterror_str ()));
-    ret = GST_FLOW_ERROR;
-    goto out;
+    return GST_FLOW_ERROR;
   } else if (recv_len == 0) {
-    ret = GST_FLOW_EOS;
-    goto out;
+    return GST_FLOW_EOS;
   }
 
   GST_BUFFER_PTS (outbuf) =
@@ -208,8 +214,11 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
       GST_TIME_ARGS (GST_BUFFER_DURATION (outbuf)),
       GST_BUFFER_OFFSET (outbuf), GST_BUFFER_OFFSET_END (outbuf));
 
-out:
-  return ret;
+  return GST_FLOW_OK;
+
+cancelled:
+  GST_DEBUG_OBJECT (src, "Cancelled");
+  return GST_FLOW_FLUSHING;
 }
 
 static gboolean

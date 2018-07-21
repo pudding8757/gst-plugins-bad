@@ -24,6 +24,7 @@
 #include <gst/gst.h>
 #include <gst/base/gstpushsrc.h>
 #include <srt/srt.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -74,6 +75,8 @@ gint          gst_srt_base_src_get_latency (GstSRTBaseSrc *src);
 const gchar * gst_srt_base_src_get_passphrase (GstSRTBaseSrc *src);
 
 gint          gst_srt_base_src_get_key_length (GstSRTBaseSrc *src);
+
+gboolean      gst_srt_base_src_is_cancelled (GstSRTBaseSrc *src);
 
 G_END_DECLS
 

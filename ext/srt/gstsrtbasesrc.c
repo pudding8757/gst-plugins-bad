@@ -24,11 +24,27 @@
 
 #include "gstsrtbasesrc.h"
 #include "gstsrt.h"
-#include <srt/srt.h>
 #include <gio/gio.h>
 
 #define GST_CAT_DEFAULT gst_debug_srt_base_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
+
+static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
+    GST_PAD_SRC,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
+
+struct _GstSRTBaseSrcPrivate
+{
+  GstUri *uri;
+  GstCaps *caps;
+  gint latency;
+  gchar *passphrase;
+  gint key_length;
+};
+
+#define GST_SRT_BASE_SRC_GET_PRIVATE(obj)  \
+       (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_SRT_BASE_SRC, GstSRTBaseSrcPrivate))
 
 enum
 {
@@ -50,39 +66,42 @@ static gchar *gst_srt_base_src_uri_get_uri (GstURIHandler * handler);
 static gboolean gst_srt_base_src_uri_set_uri (GstURIHandler * handler,
     const gchar * uri, GError ** error);
 
+#define _do_init \
+  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtbasesrc", 0, "SRT Base Source")
+
 #define gst_srt_base_src_parent_class parent_class
 G_DEFINE_ABSTRACT_TYPE_WITH_CODE (GstSRTBaseSrc, gst_srt_base_src,
-    GST_TYPE_PUSH_SRC, G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
-        gst_srt_base_src_uri_handler_init)
-    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtbasesrc", 0,
-        "SRT Base Source"));
+    GST_TYPE_PUSH_SRC, G_ADD_PRIVATE (GstSRTBaseSrc)
+    G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
+        gst_srt_base_src_uri_handler_init) _do_init);
 
 static void
 gst_srt_base_src_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
+  GstSRTBaseSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_URI:
-      if (self->uri != NULL) {
+      if (priv->uri != NULL) {
         gchar *uri_str = gst_srt_base_src_uri_get_uri (GST_URI_HANDLER (self));
         g_value_take_string (value, uri_str);
       }
       break;
     case PROP_CAPS:
       GST_OBJECT_LOCK (self);
-      gst_value_set_caps (value, self->caps);
+      gst_value_set_caps (value, priv->caps);
       GST_OBJECT_UNLOCK (self);
       break;
     case PROP_LATENCY:
-      g_value_set_int (value, self->latency);
+      g_value_set_int (value, priv->latency);
       break;
     case PROP_PASSPHRASE:
-      g_value_set_string (value, self->passphrase);
+      g_value_set_string (value, priv->passphrase);
       break;
     case PROP_KEY_LENGTH:
-      g_value_set_int (value, self->key_length);
+      g_value_set_int (value, priv->key_length);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -95,6 +114,7 @@ gst_srt_base_src_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
+  GstSRTBaseSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_URI:
@@ -103,23 +123,23 @@ gst_srt_base_src_set_property (GObject * object,
       break;
     case PROP_CAPS:
       GST_OBJECT_LOCK (self);
-      g_clear_pointer (&self->caps, gst_caps_unref);
-      self->caps = gst_caps_copy (gst_value_get_caps (value));
+      g_clear_pointer (&priv->caps, gst_caps_unref);
+      priv->caps = gst_caps_copy (gst_value_get_caps (value));
       GST_OBJECT_UNLOCK (self);
       break;
     case PROP_LATENCY:
-      self->latency = g_value_get_int (value);
+      priv->latency = g_value_get_int (value);
       break;
     case PROP_PASSPHRASE:
-      g_free (self->passphrase);
-      self->passphrase = g_value_dup_string (value);
+      g_free (priv->passphrase);
+      priv->passphrase = g_value_dup_string (value);
       break;
     case PROP_KEY_LENGTH:
     {
       gint key_length = g_value_get_int (value);
       g_return_if_fail (key_length == 16 || key_length == 24
           || key_length == 32);
-      self->key_length = key_length;
+      priv->key_length = key_length;
       break;
     }
     default:
@@ -132,10 +152,21 @@ static void
 gst_srt_base_src_finalize (GObject * object)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
+  GstSRTBaseSrcPrivate *priv = self->priv;
 
-  g_clear_pointer (&self->uri, gst_uri_unref);
-  g_clear_pointer (&self->caps, gst_caps_unref);
-  g_clear_pointer (&self->passphrase, g_free);
+  g_clear_pointer (&priv->uri, gst_uri_unref);
+  g_clear_pointer (&priv->caps, gst_caps_unref);
+  g_clear_pointer (&priv->passphrase, g_free);
+
+  if (self->poll_id != SRT_ERROR) {
+    srt_epoll_release (self->poll_id);
+    self->poll_id = SRT_ERROR;
+  }
+
+  if (self->sock != SRT_INVALID_SOCK) {
+    srt_close (self->sock);
+    self->sock = SRT_INVALID_SOCK;
+  }
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -144,11 +175,12 @@ static GstCaps *
 gst_srt_base_src_get_caps (GstBaseSrc * src, GstCaps * filter)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcPrivate *priv = self->priv;
   GstCaps *result, *caps = NULL;
 
   GST_OBJECT_LOCK (self);
-  if (self->caps != NULL) {
-    caps = gst_caps_ref (self->caps);
+  if (priv->caps != NULL) {
+    caps = gst_caps_ref (priv->caps);
   }
   GST_OBJECT_UNLOCK (self);
 
@@ -166,11 +198,83 @@ gst_srt_base_src_get_caps (GstBaseSrc * src, GstCaps * filter)
   return result;
 }
 
+static gboolean
+gst_srt_base_src_start (GstBaseSrc * src)
+{
+  GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcPrivate *priv = self->priv;
+  GstSRTBaseSrcClass *bclass = GST_SRT_BASE_SRC_GET_CLASS (self);
+  SRTSOCKET sock = SRT_INVALID_SOCK;
+  gint poll_id = SRT_ERROR;
+  GstUri *uri = NULL;
+  gboolean ret;
+
+  if (G_UNLIKELY (priv->uri == NULL)) {
+    GST_ERROR_OBJECT (src, "NULL uri");
+    return FALSE;
+  }
+
+  if (G_UNLIKELY (!bclass->open)) {
+    GST_ERROR_OBJECT (src, "Implement open vfunc");
+    return FALSE;
+  }
+
+  uri = gst_uri_ref (priv->uri);
+  ret = bclass->open (self,
+      gst_uri_get_host (uri), gst_uri_get_port (uri), &sock, &poll_id);
+
+  if (!ret)
+    goto failed;
+
+  self->sock = sock;
+  self->poll_id = poll_id;
+
+  gst_uri_unref (uri);
+
+  return TRUE;
+
+failed:
+  if (poll_id != SRT_ERROR)
+    srt_epoll_release (poll_id);
+
+  if (sock != SRT_ERROR)
+    srt_close (sock);
+
+  if (uri)
+    gst_uri_unref (uri);
+
+  return FALSE;
+}
+
+static gboolean
+gst_srt_base_src_stop (GstBaseSrc * src)
+{
+  GstSRTBaseSrc *self = GST_SRT_BASE_SRC (src);
+  GstSRTBaseSrcClass *bclass = GST_SRT_BASE_SRC_GET_CLASS (self);
+
+  if (bclass->close)
+    bclass->close (self);
+
+  if (self->poll_id != SRT_ERROR) {
+    if (self->sock != SRT_INVALID_SOCK)
+      srt_epoll_remove_usock (self->poll_id, self->sock);
+    srt_epoll_release (self->poll_id);
+  }
+  self->poll_id = SRT_ERROR;
+
+  GST_DEBUG_OBJECT (self, "closing SRT connection");
+  if (self->sock != SRT_INVALID_SOCK)
+    srt_close (self->sock);
+  self->sock = SRT_INVALID_SOCK;
+
+  return TRUE;
+}
 
 static void
 gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
 
   gobject_class->set_property = gst_srt_base_src_set_property;
@@ -212,17 +316,29 @@ gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
+  gst_element_class_add_static_pad_template (gstelement_class, &src_template);
+
   gstbasesrc_class->get_caps = GST_DEBUG_FUNCPTR (gst_srt_base_src_get_caps);
+  gstbasesrc_class->start = GST_DEBUG_FUNCPTR (gst_srt_base_src_start);
+  gstbasesrc_class->stop = GST_DEBUG_FUNCPTR (gst_srt_base_src_stop);
 }
 
 static void
 gst_srt_base_src_init (GstSRTBaseSrc * self)
 {
+  GstSRTBaseSrcPrivate *priv = GST_SRT_BASE_SRC_GET_PRIVATE (self);
+
   gst_srt_base_src_uri_set_uri (GST_URI_HANDLER (self), SRT_DEFAULT_URI, NULL);
   gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
   gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
-  self->latency = SRT_DEFAULT_LATENCY;
-  self->key_length = SRT_DEFAULT_KEY_LENGTH;
+
+  priv->latency = SRT_DEFAULT_LATENCY;
+  priv->key_length = SRT_DEFAULT_KEY_LENGTH;
+
+  self->priv = priv;
+
+  self->sock = SRT_INVALID_SOCK;
+  self->poll_id = SRT_ERROR;
 }
 
 static GstURIType
@@ -244,9 +360,10 @@ gst_srt_base_src_uri_get_uri (GstURIHandler * handler)
 {
   gchar *uri_str;
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (handler);
+  GstSRTBaseSrcPrivate *priv = GST_SRT_BASE_SRC_GET_PRIVATE (self);
 
   GST_OBJECT_LOCK (self);
-  uri_str = gst_uri_to_string (self->uri);
+  uri_str = gst_uri_to_string (priv->uri);
   GST_OBJECT_UNLOCK (self);
 
   return uri_str;
@@ -257,6 +374,7 @@ gst_srt_base_src_uri_set_uri (GstURIHandler * handler,
     const gchar * uri, GError ** error)
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (handler);
+  GstSRTBaseSrcPrivate *priv = GST_SRT_BASE_SRC_GET_PRIVATE (self);
   gboolean ret = TRUE;
   GstUri *parsed_uri = gst_uri_from_string (uri);
 
@@ -269,8 +387,8 @@ gst_srt_base_src_uri_set_uri (GstURIHandler * handler,
 
   GST_OBJECT_LOCK (self);
 
-  g_clear_pointer (&self->uri, gst_uri_unref);
-  self->uri = gst_uri_ref (parsed_uri);
+  g_clear_pointer (&priv->uri, gst_uri_unref);
+  priv->uri = gst_uri_ref (parsed_uri);
 
   GST_OBJECT_UNLOCK (self);
 
@@ -288,4 +406,28 @@ gst_srt_base_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
   iface->get_protocols = gst_srt_base_src_uri_get_protocols;
   iface->get_uri = gst_srt_base_src_uri_get_uri;
   iface->set_uri = gst_srt_base_src_uri_set_uri;
+}
+
+gint
+gst_srt_base_src_get_latency (GstSRTBaseSrc * src)
+{
+  GstSRTBaseSrcPrivate *priv = src->priv;
+
+  return priv->latency;
+}
+
+const gchar *
+gst_srt_base_src_get_passphrase (GstSRTBaseSrc * src)
+{
+  GstSRTBaseSrcPrivate *priv = src->priv;
+
+  return priv->passphrase;
+}
+
+gint
+gst_srt_base_src_get_key_length (GstSRTBaseSrc * src)
+{
+  GstSRTBaseSrcPrivate *priv = src->priv;
+
+  return priv->key_length;
 }

@@ -23,6 +23,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstpushsrc.h>
+#include <srt/srt.h>
 
 G_BEGIN_DECLS
 
@@ -35,31 +36,44 @@ G_BEGIN_DECLS
 #define GST_SRT_BASE_SRC_CAST(obj)         ((GstSRTBaseSrc*)(obj))
 #define GST_SRT_BASE_SRC_CLASS_CAST(klass) ((GstSRTBaseSrcClass*)(klass))
 
+#define GST_SRT_BASE_SRC_SOCKET(obj)       (GST_SRT_BASE_SRC_CAST(obj)->sock)
+#define GST_SRT_BASE_SRC_POLL_ID(obj)      (GST_SRT_BASE_SRC_CAST(obj)->poll_id)
+
 typedef struct _GstSRTBaseSrc GstSRTBaseSrc;
 typedef struct _GstSRTBaseSrcClass GstSRTBaseSrcClass;
+typedef struct _GstSRTBaseSrcPrivate GstSRTBaseSrcPrivate;
 
 struct _GstSRTBaseSrc {
   GstPushSrc parent;
 
-  GstUri *uri;
-  GstCaps *caps;
-  gint latency;
-  gchar *passphrase;
-  gint key_length;
-
+  /*< protected >*/
+  SRTSOCKET sock;
+  gint poll_id;
 
   /*< private >*/
+  GstSRTBaseSrcPrivate *priv;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 
 struct _GstSRTBaseSrcClass {
   GstPushSrcClass parent_class;
 
+  gboolean (*open)    (GstSRTBaseSrc *src, const gchar * host, guint port,
+                       SRTSOCKET *sock, gint *poll_id);
+  gboolean (*close)   (GstSRTBaseSrc *src);
+
   gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT
 GType gst_srt_base_src_get_type (void);
+
+gint          gst_srt_base_src_get_latency (GstSRTBaseSrc *src);
+
+const gchar * gst_srt_base_src_get_passphrase (GstSRTBaseSrc *src);
+
+gint          gst_srt_base_src_get_key_length (GstSRTBaseSrc *src);
 
 G_END_DECLS
 

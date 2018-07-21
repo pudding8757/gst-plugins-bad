@@ -45,21 +45,14 @@
 
 #define SRT_DEFAULT_POLL_TIMEOUT 100
 
-static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
-    GST_PAD_SRC,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY);
-
 #define GST_CAT_DEFAULT gst_debug_srt_server_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
 struct _GstSRTServerSrcPrivate
 {
-  SRTSOCKET sock;
   SRTSOCKET client_sock;
   GSocketAddress *client_sockaddr;
 
-  gint poll_id;
   gint poll_timeout;
 
   gboolean has_client;
@@ -100,7 +93,7 @@ gst_srt_server_src_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (object);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -117,7 +110,7 @@ gst_srt_server_src_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (object);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -132,19 +125,6 @@ gst_srt_server_src_set_property (GObject * object,
 static void
 gst_srt_server_src_finalize (GObject * object)
 {
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (object);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
-
-  if (priv->poll_id != SRT_ERROR) {
-    srt_epoll_release (priv->poll_id);
-    priv->poll_id = SRT_ERROR;
-  }
-
-  if (priv->sock != SRT_ERROR) {
-    srt_close (priv->sock);
-    priv->sock = SRT_ERROR;
-  }
-
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -152,7 +132,7 @@ static GstFlowReturn
 gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
   GstFlowReturn ret = GST_FLOW_OK;
   GstMapInfo info;
   SRTSOCKET ready[2];
@@ -163,7 +143,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   while (!priv->has_client) {
     GST_DEBUG_OBJECT (self, "poll wait (timeout: %d)", priv->poll_timeout);
 
-    if (srt_epoll_wait (priv->poll_id, ready, &(int) {
+    if (srt_epoll_wait (GST_SRT_BASE_SRC_POLL_ID (self), ready, &(int) {
             2}, 0, 0, priv->poll_timeout, 0, 0, 0, 0) == -1) {
       int srt_errno = srt_getlasterror (NULL);
 
@@ -185,7 +165,8 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     }
 
     priv->client_sock =
-        srt_accept (priv->sock, &client_sa, (int *) &client_sa_len);
+        srt_accept (GST_SRT_BASE_SRC_SOCKET (self), &client_sa,
+        (int *) &client_sa_len);
 
     GST_DEBUG_OBJECT (self, "checking client sock");
     if (priv->client_sock == SRT_INVALID_SOCK) {
@@ -255,57 +236,49 @@ out:
 }
 
 static gboolean
-gst_srt_server_src_start (GstBaseSrc * src)
+gst_srt_server_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
+    SRTSOCKET * sock, gint * poll_id)
 {
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
-  GstSRTBaseSrc *base = GST_SRT_BASE_SRC (src);
-  GstUri *uri = gst_uri_ref (base->uri);
-  GError *error = NULL;
-  const gchar *host;
+  gint latency = gst_srt_base_src_get_latency (src);
+  const gchar *passphrase = gst_srt_base_src_get_passphrase (src);
+  gint key_len = gst_srt_base_src_get_key_length (src);
 
-  if (gst_uri_get_port (uri) == GST_URI_NO_PORT) {
+  if (!port) {
     GST_ELEMENT_ERROR (src, RESOURCE, OPEN_WRITE, NULL, (("Invalid port")));
     return FALSE;
   }
 
-  host = gst_uri_get_host (uri);
+  *sock = gst_srt_server_listen (GST_ELEMENT (src),
+      FALSE, host, port, latency, poll_id, passphrase, key_len);
 
-  priv->sock = gst_srt_server_listen (GST_ELEMENT (self),
-      FALSE, host, gst_uri_get_port (uri),
-      base->latency, &priv->poll_id, base->passphrase, base->key_length);
-
-  if (priv->sock == SRT_INVALID_SOCK) {
+  if (*sock == SRT_INVALID_SOCK) {
     GST_ERROR_OBJECT (src, "Failed to create srt socket");
     goto failed;
   }
 
-  g_clear_pointer (&uri, gst_uri_unref);
-
   return TRUE;
 
 failed:
-  if (priv->poll_id != SRT_ERROR) {
-    srt_epoll_release (priv->poll_id);
-    priv->poll_id = SRT_ERROR;
+  if (*poll_id != SRT_ERROR) {
+    srt_epoll_release (*poll_id);
+    *poll_id = SRT_ERROR;
   }
 
-  if (priv->sock != SRT_ERROR) {
-    srt_close (priv->sock);
-    priv->sock = SRT_ERROR;
+  if (*sock != SRT_ERROR) {
+    srt_close (*sock);
+    *sock = SRT_ERROR;
   }
-
-  g_clear_error (&error);
-  g_clear_pointer (&uri, gst_uri_unref);
 
   return FALSE;
 }
 
 static gboolean
-gst_srt_server_src_stop (GstBaseSrc * src)
+gst_srt_server_src_close (GstSRTBaseSrc * src)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
+
+  GST_DEBUG_OBJECT (self, "Close");
 
   if (priv->client_sock != SRT_INVALID_SOCK) {
     g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0,
@@ -314,18 +287,6 @@ gst_srt_server_src_stop (GstBaseSrc * src)
     g_clear_object (&priv->client_sockaddr);
     priv->client_sock = SRT_INVALID_SOCK;
     priv->has_client = FALSE;
-  }
-
-  if (priv->poll_id != SRT_ERROR) {
-    srt_epoll_remove_usock (priv->poll_id, priv->sock);
-    srt_epoll_release (priv->poll_id);
-    priv->poll_id = SRT_ERROR;
-  }
-
-  if (priv->sock != SRT_INVALID_SOCK) {
-    GST_DEBUG_OBJECT (self, "closing SRT connection");
-    srt_close (priv->sock);
-    priv->sock = SRT_INVALID_SOCK;
   }
 
   priv->cancelled = FALSE;
@@ -337,7 +298,7 @@ static gboolean
 gst_srt_server_src_unlock (GstBaseSrc * src)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
 
   priv->cancelled = TRUE;
 
@@ -348,7 +309,7 @@ static gboolean
 gst_srt_server_src_unlock_stop (GstBaseSrc * src)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
-  GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
+  GstSRTServerSrcPrivate *priv = self->priv;
 
   priv->cancelled = FALSE;
 
@@ -362,6 +323,7 @@ gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
   GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
   GstPushSrcClass *gstpushsrc_class = GST_PUSH_SRC_CLASS (klass);
+  GstSRTBaseSrcClass *gstsrtbasesrc_class = GST_SRT_BASE_SRC_CLASS (klass);
 
   gobject_class->set_property = gst_srt_server_src_set_property;
   gobject_class->get_property = gst_srt_server_src_get_property;
@@ -411,19 +373,19 @@ gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
       NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE,
       2, G_TYPE_INT, G_TYPE_SOCKET_ADDRESS);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &src_template);
   gst_element_class_set_metadata (gstelement_class,
       "SRT Server source", "Source/Network",
       "Receive data over the network via SRT",
       "Justin Kim <justin.kim@collabora.com>");
 
-  gstbasesrc_class->start = GST_DEBUG_FUNCPTR (gst_srt_server_src_start);
-  gstbasesrc_class->stop = GST_DEBUG_FUNCPTR (gst_srt_server_src_stop);
   gstbasesrc_class->unlock = GST_DEBUG_FUNCPTR (gst_srt_server_src_unlock);
   gstbasesrc_class->unlock_stop =
       GST_DEBUG_FUNCPTR (gst_srt_server_src_unlock_stop);
 
   gstpushsrc_class->fill = GST_DEBUG_FUNCPTR (gst_srt_server_src_fill);
+
+  gstsrtbasesrc_class->open = GST_DEBUG_FUNCPTR (gst_srt_server_src_open);
+  gstsrtbasesrc_class->close = GST_DEBUG_FUNCPTR (gst_srt_server_src_close);
 }
 
 static void
@@ -431,8 +393,8 @@ gst_srt_server_src_init (GstSRTServerSrc * self)
 {
   GstSRTServerSrcPrivate *priv = GST_SRT_SERVER_SRC_GET_PRIVATE (self);
 
-  priv->sock = SRT_INVALID_SOCK;
   priv->client_sock = SRT_INVALID_SOCK;
-  priv->poll_id = SRT_ERROR;
   priv->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
+
+  self->priv = priv;
 }

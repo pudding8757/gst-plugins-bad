@@ -42,14 +42,10 @@ typedef struct _GstSRTServerSrcClass GstSRTServerSrcClass;
 struct _GstSRTServerSrc {
   GstSRTBaseSrc parent;
 
-  SRTSOCKET sock;
   SRTSOCKET client_sock;
   GSocketAddress *client_sockaddr;
 
-  gint poll_id;
-
   gboolean has_client;
-  gboolean cancelled;
 };
 
 struct _GstSRTServerSrcClass {

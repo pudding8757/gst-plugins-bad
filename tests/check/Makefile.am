@@ -216,6 +216,12 @@ else
 check_msdk=
 endif
 
+if USE_SRT
+check_srt=elements/srt
+else
+check_srt=
+endif
+
 VALGRIND_TO_FIX = \
 	elements/mpeg2enc \
 	elements/mplex    \
@@ -299,6 +305,7 @@ check_PROGRAMS = \
 	$(check_player) \
 	$(check_webrtc) \
 	$(check_msdk) \
+	$(check_srt) \
 	$(EXPERIMENTAL_CHECKS)
 
 noinst_HEADERS = elements/mxfdemux.h libs/isoff.h
@@ -596,6 +603,9 @@ libs_planaraudioadapter_LDADD = \
 libs_planaraudioadapter_CFLAGS = \
 	$(GST_PLUGINS_BASE_CLAGS) $(GST_PLUGINS_BAD_CFLAGS) \
 	$(GST_BASE_CFLAGS) $(GST_AUDIO_CFLAGS) $(CFLAGS) $(AM_CFLAGS)
+
+elements_srt_CFLAGS = $(GST_PLUGINS_BASE_CFLAGS) $(GST_BASE_CFLAGS) $(AM_CFLAGS) $(GIO_CFLAGS)
+elements_srt_LDADD = $(GST_PLUGINS_BASE_LIBS) $(GST_BASE_LIBS) $(LDADD) $(GIO_LIBS)
 
 distclean-local-orc:
 	rm -rf orc

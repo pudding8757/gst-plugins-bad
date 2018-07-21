@@ -43,6 +43,8 @@ struct _GstSRTServerSrc {
   GstSRTBaseSrc parent;
 
   /*< private >*/
+  GstSRTServerSrcPrivate *priv;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 

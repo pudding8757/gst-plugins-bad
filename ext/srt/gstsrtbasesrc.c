@@ -30,6 +30,11 @@
 #define GST_CAT_DEFAULT gst_debug_srt_base_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
+static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
+    GST_PAD_SRC,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
+
 enum
 {
   PROP_URI = 1,
@@ -63,17 +68,19 @@ gst_srt_base_src_get_property (GObject * object,
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
       if (self->uri != NULL) {
-        gchar *uri_str = gst_srt_base_src_uri_get_uri (GST_URI_HANDLER (self));
+        gchar *uri_str;
+        GST_OBJECT_UNLOCK (self);
+        uri_str = gst_srt_base_src_uri_get_uri (GST_URI_HANDLER (self));
         g_value_take_string (value, uri_str);
+        GST_OBJECT_LOCK (self);
       }
       break;
     case PROP_CAPS:
-      GST_OBJECT_LOCK (self);
       gst_value_set_caps (value, self->caps);
-      GST_OBJECT_UNLOCK (self);
       break;
     case PROP_LATENCY:
       g_value_set_int (value, self->latency);
@@ -88,6 +95,7 @@ gst_srt_base_src_get_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -96,16 +104,17 @@ gst_srt_base_src_set_property (GObject * object,
 {
   GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
+      GST_OBJECT_UNLOCK (self);
       gst_srt_base_src_uri_set_uri (GST_URI_HANDLER (self),
           g_value_get_string (value), NULL);
+      GST_OBJECT_LOCK (self);
       break;
     case PROP_CAPS:
-      GST_OBJECT_LOCK (self);
       g_clear_pointer (&self->caps, gst_caps_unref);
       self->caps = gst_caps_copy (gst_value_get_caps (value));
-      GST_OBJECT_UNLOCK (self);
       break;
     case PROP_LATENCY:
       self->latency = g_value_get_int (value);
@@ -126,6 +135,7 @@ gst_srt_base_src_set_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -166,11 +176,11 @@ gst_srt_base_src_get_caps (GstBaseSrc * src, GstCaps * filter)
   return result;
 }
 
-
 static void
 gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
 
   gobject_class->set_property = gst_srt_base_src_set_property;
@@ -211,6 +221,8 @@ gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
       32, SRT_DEFAULT_KEY_LENGTH, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
+
+  gst_element_class_add_static_pad_template (gstelement_class, &src_template);
 
   gstbasesrc_class->get_caps = GST_DEBUG_FUNCPTR (gst_srt_base_src_get_caps);
 }

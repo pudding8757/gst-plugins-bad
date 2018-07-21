@@ -42,12 +42,13 @@ typedef struct _GstSRTBaseSrcClass GstSRTBaseSrcClass;
 struct _GstSRTBaseSrc {
   GstPushSrc parent;
 
+  /*< protected >*/
+  /* protected by GST_OBJECT_LOCK */
   GstUri *uri;
   GstCaps *caps;
   gint latency;
   gchar *passphrase;
   gint key_length;
-
 
   /*< private >*/
   GstClockTime start_timestamp;

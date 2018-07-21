@@ -49,11 +49,6 @@
 
 #include "gstsrt.h"
 
-static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
-    GST_PAD_SRC,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY);
-
 #define GST_CAT_DEFAULT gst_debug_srt_client_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -96,7 +91,7 @@ gst_srt_client_src_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (object);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -121,8 +116,8 @@ static void
 gst_srt_client_src_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
-  GstSRTBaseSrc *self = GST_SRT_BASE_SRC (object);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (object);
+  GstSRTClientSrcPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -148,7 +143,7 @@ static void
 gst_srt_client_src_finalize (GObject * object)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (object);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrcPrivate *priv = self->priv;
 
   if (priv->poll_id != SRT_ERROR) {
     srt_epoll_release (priv->poll_id);
@@ -169,7 +164,7 @@ static GstFlowReturn
 gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (src);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrcPrivate *priv = self->priv;
   GstFlowReturn ret = GST_FLOW_OK;
   GstMapInfo info;
   SRTSOCKET ready[2];
@@ -177,7 +172,7 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   SRT_MSGCTRL mc = srt_msgctrl_default;
 
   if (srt_epoll_wait (priv->poll_id, 0, 0, ready, &(int) {
-          2}, priv->poll_timeout, 0, 0, 0, 0) == -1) {
+          2}, priv->poll_timeout, 0, 0, 0, 0) == SRT_ERROR) {
 
     /* Assuming that timeout error is normal */
     if (srt_getlasterror (NULL) != SRT_ETIMEOUT) {
@@ -232,18 +227,35 @@ static gboolean
 gst_srt_client_src_start (GstBaseSrc * src)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (src);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrcPrivate *priv = self->priv;
   GstSRTBaseSrc *base = GST_SRT_BASE_SRC (src);
-  GstUri *uri = gst_uri_ref (base->uri);
+  GstUri *uri = NULL;
   GSocketAddress *socket_address = NULL;
+  gint latency;
+  gchar *passphrase = NULL;
+  gint key_length;
+
+  GST_OBJECT_LOCK (src);
+  if (G_UNLIKELY (base->uri == NULL)) {
+    GST_OBJECT_UNLOCK (src);
+    GST_ERROR_OBJECT (src, "NULL uri");
+    return FALSE;
+  }
+
+  uri = gst_uri_ref (base->uri);
+  latency = base->latency;
+  passphrase = g_strdup (base->passphrase);
+  key_length = base->key_length;
+  GST_OBJECT_UNLOCK (src);
 
   priv->sock = gst_srt_client_connect (GST_ELEMENT (src), FALSE,
       gst_uri_get_host (uri), gst_uri_get_port (uri), priv->rendez_vous,
-      priv->bind_address, priv->bind_port, base->latency,
-      &socket_address, &priv->poll_id, base->passphrase, base->key_length);
+      priv->bind_address, priv->bind_port, latency,
+      &socket_address, &priv->poll_id, passphrase, key_length);
 
   g_clear_object (&socket_address);
   g_clear_pointer (&uri, gst_uri_unref);
+  g_free (passphrase);
 
   return (priv->sock != SRT_INVALID_SOCK);
 }
@@ -252,7 +264,7 @@ static gboolean
 gst_srt_client_src_stop (GstBaseSrc * src)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (src);
-  GstSRTClientSrcPrivate *priv = GST_SRT_CLIENT_SRC_GET_PRIVATE (self);
+  GstSRTClientSrcPrivate *priv = self->priv;
 
   if (priv->poll_id != SRT_ERROR) {
     if (priv->sock != SRT_INVALID_SOCK)
@@ -310,7 +322,6 @@ gst_srt_client_src_class_init (GstSRTClientSrcClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &src_template);
   gst_element_class_set_metadata (gstelement_class,
       "SRT client source", "Source/Network",
       "Receive data over the network via SRT",
@@ -333,4 +344,6 @@ gst_srt_client_src_init (GstSRTClientSrc * self)
   priv->rendez_vous = FALSE;
   priv->bind_address = NULL;
   priv->bind_port = 0;
+
+  self->priv = priv;
 }

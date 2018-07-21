@@ -54,6 +54,7 @@ gst*orc.h
 /tests/check/libs/player_dummy.c
 /tests/check/elements/videoframe-audiolevel
 /tests/check/elements/pnm
+/tests/check/elements/srt
 /tests/check/pipelines/simple-launch-lines
 /tests/check/pipelines/ipcpipeline
 /tests/examples/audiomixmatrix/test-audiomixmatrix

@@ -58,7 +58,9 @@ struct _GstSRTServerSrcPrivate
   gint poll_timeout;
 
   gboolean has_client;
-  gboolean cancelled;
+
+  GCancellable *cancellable;
+  SYSSOCKET event_fd;
 };
 
 #define GST_SRT_SERVER_SRC_GET_PRIVATE(obj)  \
@@ -140,6 +142,8 @@ gst_srt_server_src_finalize (GObject * object)
     priv->sock = SRT_INVALID_SOCK;
   }
 
+  g_object_unref (priv->cancellable);
+
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -148,38 +152,56 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
 {
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
   GstSRTServerSrcPrivate *priv = self->priv;
-  GstFlowReturn ret = GST_FLOW_OK;
   GstMapInfo info;
   SRTSOCKET ready[2];
+  SYSSOCKET cancellable[2];
   gint recv_len;
-  struct sockaddr client_sa;
-  size_t client_sa_len;
+  struct sockaddr client_sa = { 0, };
+  size_t client_sa_len = sizeof (struct sockaddr_in);
   SRT_MSGCTRL mc = srt_msgctrl_default;
 
-  while (!priv->has_client) {
-    GST_DEBUG_OBJECT (self, "poll wait (timeout: %d)", priv->poll_timeout);
+  /* In here, wait event of SRTSOCKET and/or SYSSOCKE (fd of GCancellable)
+   * Note that, to interrupt srt_epoll_wait() without releasing the epoll,
+   * we installed GCancellable's fd to epoll. And, there is no way to
+   * interrupt recv(), we will make a client socekt non-blocking and the client
+   * socket will be installed to epoll in order to ensure both non-zero size
+   * received buffer and also cancelling any I/O
+   *
+   * Flow:
+   * 1) check cancellable first for termination
+   * 2) Wait/Accept client socket and,
+   *   ADD the client socket to epoll
+   *   REMOVE the server socket from epoll
+   * 3) When client socket was disconnected,
+   *   REMOVE the client socket from epoll
+   *   ADD the server socket to epoll
+   */
 
-    if (srt_epoll_wait (priv->poll_id, ready, &(int) {
-            2}, 0, 0, priv->poll_timeout, 0, 0, 0, 0) == SRT_ERROR) {
-      int srt_errno = srt_getlasterror (NULL);
+retry:
+  if (srt_epoll_wait (priv->poll_id, ready, &(int) {
+          2}, 0, 0, priv->poll_timeout, cancellable, &(int) {
+          2}, 0, 0) == SRT_ERROR) {
+    int srt_errno;
 
-      /* Assuming that timeout error is normal */
-      if (srt_errno != SRT_ETIMEOUT) {
-        GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
-            ("SRT error: %s", srt_getlasterror_str ()), (NULL));
+    if (g_cancellable_is_cancelled (priv->cancellable))
+      goto cancelled;
 
-        return GST_FLOW_ERROR;
-      }
+    srt_errno = srt_getlasterror (NULL);
 
-      /* Mimicking cancellable */
-      if (srt_errno == SRT_ETIMEOUT && priv->cancelled) {
-        GST_DEBUG_OBJECT (self, "Cancelled waiting for client");
-        return GST_FLOW_FLUSHING;
-      }
-
-      continue;
+    /* Assuming that timeout error is normal */
+    if (srt_errno != SRT_ETIMEOUT) {
+      GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
+          ("SRT error: %s", srt_getlasterror_str ()), (NULL));
+      return GST_FLOW_ERROR;
     }
 
+    goto retry;
+  }
+
+  if (g_cancellable_is_cancelled (priv->cancellable))
+    goto cancelled;
+
+  if (G_UNLIKELY (!priv->has_client)) {
     priv->client_sock =
         srt_accept (priv->sock, &client_sa, (int *) &client_sa_len);
 
@@ -196,7 +218,17 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
           client_sa_len);
       g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0,
           priv->client_sock, priv->client_sockaddr);
+
+      /* Make SRT client socket non-blocking */
+      srt_setsockopt (priv->client_sock, 0, SRTO_RCVSYN, &(int) {
+          0}, sizeof (int));
+
+      srt_epoll_add_usock (priv->poll_id, priv->client_sock, &(int) {
+          SRT_EPOLL_IN | SRT_EPOLL_ERR});
+      srt_epoll_remove_usock (priv->poll_id, priv->sock);
     }
+
+    goto retry;
   }
 
   GST_DEBUG_OBJECT (self, "filling buffer");
@@ -204,8 +236,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   if (!gst_buffer_map (outbuf, &info, GST_MAP_WRITE)) {
     GST_ELEMENT_ERROR (src, RESOURCE, WRITE,
         ("Could not map the output stream"), (NULL));
-    ret = GST_FLOW_ERROR;
-    goto out;
+    return GST_FLOW_ERROR;
   }
 
   recv_len = srt_recvmsg2 (priv->client_sock, (char *) info.data,
@@ -219,16 +250,18 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     g_signal_emit (self, signals[SIG_CLIENT_CLOSED], 0,
         priv->client_sock, priv->client_sockaddr);
 
+    srt_epoll_remove_usock (priv->poll_id, priv->client_sock);
+    srt_epoll_add_usock (priv->poll_id, priv->sock, &(int) {
+        SRT_EPOLL_IN | SRT_EPOLL_ERR});
+
     srt_close (priv->client_sock);
     priv->client_sock = SRT_INVALID_SOCK;
     g_clear_object (&priv->client_sockaddr);
     priv->has_client = FALSE;
     gst_buffer_resize (outbuf, 0, 0);
-    ret = GST_FLOW_OK;
-    goto out;
+    return GST_FLOW_OK;
   } else if (recv_len == 0) {
-    ret = GST_FLOW_EOS;
-    goto out;
+    return GST_FLOW_EOS;
   }
 
   gst_srt_base_src_do_timestamp (GST_SRT_BASE_SRC (src), outbuf, &mc);
@@ -244,8 +277,11 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
       GST_TIME_ARGS (GST_BUFFER_DURATION (outbuf)),
       GST_BUFFER_OFFSET (outbuf), GST_BUFFER_OFFSET_END (outbuf));
 
-out:
-  return ret;
+  return GST_FLOW_OK;
+
+cancelled:
+  GST_DEBUG_OBJECT (src, "Cancelled");
+  return GST_FLOW_FLUSHING;
 }
 
 static gboolean
@@ -285,6 +321,11 @@ gst_srt_server_src_start (GstBaseSrc * src)
     GST_ERROR_OBJECT (src, "Failed to create srt socket");
     goto failed;
   }
+
+  /* HACK: Since srt_epoll_wait() is not cancellable, install our event fd to
+   * epoll */
+  priv->event_fd = g_cancellable_get_fd (priv->cancellable);
+  srt_epoll_add_ssock (priv->poll_id, priv->event_fd, NULL);
 
   g_clear_pointer (&uri, gst_uri_unref);
   g_free (passphrase);
@@ -326,6 +367,8 @@ gst_srt_server_src_stop (GstBaseSrc * src)
   if (priv->poll_id != SRT_ERROR) {
     if (priv->sock != SRT_INVALID_SOCK)
       srt_epoll_remove_usock (priv->poll_id, priv->sock);
+    if (priv->event_fd != SRT_INVALID_SOCK)
+      srt_epoll_remove_ssock (priv->poll_id, priv->event_fd);
     srt_epoll_release (priv->poll_id);
     priv->poll_id = SRT_ERROR;
   }
@@ -336,8 +379,6 @@ gst_srt_server_src_stop (GstBaseSrc * src)
     priv->sock = SRT_INVALID_SOCK;
   }
 
-  priv->cancelled = FALSE;
-
   return TRUE;
 }
 
@@ -347,7 +388,8 @@ gst_srt_server_src_unlock (GstBaseSrc * src)
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
   GstSRTServerSrcPrivate *priv = self->priv;
 
-  priv->cancelled = TRUE;
+  GST_DEBUG_OBJECT (src, "Unlock");
+  g_cancellable_cancel (priv->cancellable);
 
   return TRUE;
 }
@@ -358,7 +400,8 @@ gst_srt_server_src_unlock_stop (GstBaseSrc * src)
   GstSRTServerSrc *self = GST_SRT_SERVER_SRC (src);
   GstSRTServerSrcPrivate *priv = self->priv;
 
-  priv->cancelled = FALSE;
+  GST_DEBUG_OBJECT (src, "Unlock stop");
+  g_cancellable_reset (priv->cancellable);
 
   return TRUE;
 }
@@ -442,6 +485,8 @@ gst_srt_server_src_init (GstSRTServerSrc * self)
   priv->client_sock = SRT_INVALID_SOCK;
   priv->poll_id = SRT_ERROR;
   priv->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
+  priv->cancellable = g_cancellable_new ();
+  priv->event_fd = SRT_INVALID_SOCK;
 
   self->priv = priv;
 }

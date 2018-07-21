@@ -23,6 +23,8 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstpushsrc.h>
+#include <srt/srt.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -35,18 +37,26 @@ G_BEGIN_DECLS
 #define GST_SRT_BASE_SRC_CAST(obj)         ((GstSRTBaseSrc*)(obj))
 #define GST_SRT_BASE_SRC_CLASS_CAST(klass) ((GstSRTBaseSrcClass*)(klass))
 
+#define GST_SRT_FLOW_AGAIN GST_FLOW_CUSTOM_SUCCESS
+
 typedef struct _GstSRTBaseSrc GstSRTBaseSrc;
 typedef struct _GstSRTBaseSrcClass GstSRTBaseSrcClass;
 
 struct _GstSRTBaseSrc {
   GstPushSrc parent;
 
+  /*< protected >*/
   GstUri *uri;
   GstCaps *caps;
   gint latency;
   gchar *passphrase;
   gint key_length;
 
+  SRTSOCKET sock;
+  gint poll_id;
+
+  GCancellable *cancellable;
+  SYSSOCKET event_fd;
 
   /*< private >*/
   gpointer _gst_reserved[GST_PADDING];
@@ -54,6 +64,9 @@ struct _GstSRTBaseSrc {
 
 struct _GstSRTBaseSrcClass {
   GstPushSrcClass parent_class;
+
+  gboolean      (*open) (GstSRTBaseSrc *src, const gchar * host, guint port, gint *poll_id, SRTSOCKET *socket);
+  GstFlowReturn (*receive_message) (GstSRTBaseSrc *src, SRTSOCKET socket, GstBuffer *outbuf);
 
   gpointer _gst_reserved[GST_PADDING_LARGE];
 };

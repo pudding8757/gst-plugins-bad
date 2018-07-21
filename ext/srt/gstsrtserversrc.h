@@ -22,8 +22,6 @@
 #define __GST_SRT_SERVER_SRC_H__
 
 #include "gstsrtbasesrc.h"
-#include <gio/gio.h>
-#include <srt/srt.h>
 
 G_BEGIN_DECLS
 
@@ -38,13 +36,14 @@ G_BEGIN_DECLS
 
 typedef struct _GstSRTServerSrc GstSRTServerSrc;
 typedef struct _GstSRTServerSrcClass GstSRTServerSrcClass;
-typedef struct _GstSRTServerSrcPrivate GstSRTServerSrcPrivate;
 
 struct _GstSRTServerSrc {
   GstSRTBaseSrc parent;
 
-  /*< private >*/
-  gpointer _gst_reserved[GST_PADDING];
+  SRTSOCKET client_sock;
+  GSocketAddress *client_sockaddr;
+
+  gboolean has_client;
 };
 
 struct _GstSRTServerSrcClass {
@@ -52,8 +51,6 @@ struct _GstSRTServerSrcClass {
 
   void (*client_added)      (GstSRTServerSrc *self, int sock, GSocketAddress *addr);
   void (*client_closed)     (GstSRTServerSrc *self, int sock, GSocketAddress *addr);
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

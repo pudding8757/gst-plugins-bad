@@ -170,7 +170,7 @@ gst_srt_client_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
   const gchar *passphrase = gst_srt_base_sink_get_passphrase (sink);
   gint key_len = gst_srt_base_sink_get_key_length (sink);
 
-  *sock = gst_srt_client_connect (GST_ELEMENT (sink), FALSE,
+  *sock = gst_srt_client_connect (GST_ELEMENT (sink), NULL, FALSE,
       host, port, priv->rendez_vous,
       priv->bind_address, priv->bind_port, latency,
       &priv->sockaddr, poll_id, passphrase, key_len);

@@ -32,9 +32,54 @@
 #define GST_CAT_DEFAULT gst_debug_srt
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
+static GSocketAddress *
+gst_srt_socket_address_new (GstElement * elem, const gchar * host, guint16 port,
+    GCancellable * cancellable, GError ** error)
+{
+  GInetAddress *iaddr = NULL;
+  GSocketAddress *addr = NULL;
+
+  if (host == NULL) {
+    iaddr = g_inet_address_new_any (G_SOCKET_FAMILY_IPV4);
+  } else {
+    iaddr = g_inet_address_new_from_string (host);
+  }
+
+  if (!iaddr) {
+    GList *results;
+    GResolver *resolver = g_resolver_get_default ();
+
+    results = g_resolver_lookup_by_name (resolver, host, cancellable, error);
+
+    if (!results) {
+      GST_ERROR_OBJECT (elem, "Failed to resolve %s", host);
+      g_object_unref (resolver);
+      return NULL;
+    }
+
+    iaddr = G_INET_ADDRESS (g_object_ref (results->data));
+
+    g_resolver_free_addresses (results);
+    g_object_unref (resolver);
+  }
+#ifndef GST_DISABLE_GST_DEBUG
+  {
+    gchar *ip = g_inet_address_to_string (iaddr);
+
+    GST_DEBUG_OBJECT (elem, "IP address for host %s is %s", host, ip);
+    g_free (ip);
+  }
+#endif
+
+  addr = g_inet_socket_address_new (iaddr, port);
+  g_object_unref (iaddr);
+
+  return addr;
+}
+
 SRTSOCKET
-gst_srt_client_connect (GstElement * elem, int sender,
-    const gchar * host, guint16 port, int rendez_vous,
+gst_srt_client_connect (GstElement * elem, GCancellable * cancellable,
+    int sender, const gchar * host, guint16 port, int rendez_vous,
     const gchar * bind_address, guint16 bind_port, int latency,
     GSocketAddress ** socket_address, gint * poll_id, const gchar * passphrase,
     int key_length)
@@ -50,11 +95,16 @@ gst_srt_client_connect (GstElement * elem, int sender,
     goto failed;
   }
 
-  *socket_address = g_inet_socket_address_new_from_string (host, port);
+  *socket_address =
+      gst_srt_socket_address_new (elem, host, port, cancellable, &error);
 
   if (*socket_address == NULL) {
-    GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid host"),
-        ("Failed to parse host"));
+    if (error->code == G_IO_ERROR_CANCELLED) {
+      GST_DEBUG_OBJECT (elem, "Resolving cancelled from another thread");
+    } else {
+      GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid address"),
+          ("Can't parse address to sockaddr: %s", error->message));
+    }
     goto failed;
   }
 
@@ -166,9 +216,9 @@ failed:
 }
 
 SRTSOCKET
-gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
-    guint16 port, int latency, gint * poll_id, const gchar * passphrase,
-    int key_length)
+gst_srt_server_listen (GstElement * elem, GCancellable * cancellable,
+    int sender, const gchar * host, guint16 port, int latency,
+    gint * poll_id, const gchar * passphrase, int key_length)
 {
   SRTSOCKET sock = SRT_INVALID_SOCK;
   GError *error = NULL;
@@ -176,18 +226,15 @@ gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
   size_t sa_len;
   GSocketAddress *addr = NULL;
 
-  if (host == NULL) {
-    GInetAddress *any = g_inet_address_new_any (G_SOCKET_FAMILY_IPV4);
-
-    addr = g_inet_socket_address_new (any, port);
-    g_object_unref (any);
-  } else {
-    addr = g_inet_socket_address_new_from_string (host, port);
-  }
+  addr = gst_srt_socket_address_new (elem, host, port, cancellable, &error);
 
   if (addr == NULL) {
-    GST_WARNING_OBJECT (elem,
-        "failed to extract host or port from the given URI");
+    if (error->code == G_IO_ERROR_CANCELLED) {
+      GST_DEBUG_OBJECT (elem, "Resolving cancelled from another thread");
+    } else {
+      GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid address"),
+          ("Can't parse address to sockaddr: %s", error->message));
+    }
     goto failed;
   }
 

@@ -60,7 +60,8 @@ struct _GstSRTBaseSrc {
 struct _GstSRTBaseSrcClass {
   GstPushSrcClass parent_class;
 
-  gboolean (*open)    (GstSRTBaseSrc *src, const gchar * host, guint port,
+  gboolean (*open)    (GstSRTBaseSrc *src, GCancellable * cancellable,
+                       const gchar * host, guint port,
                        SRTSOCKET *sock, gint *poll_id);
   gboolean (*close)   (GstSRTBaseSrc *src);
 

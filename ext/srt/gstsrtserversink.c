@@ -284,7 +284,7 @@ gst_srt_server_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
     return FALSE;
   }
 
-  *sock = gst_srt_server_listen (GST_ELEMENT (sink),
+  *sock = gst_srt_server_listen (GST_ELEMENT (sink), NULL,
       TRUE, host, port, latency, poll_id, passphrase, key_len);
 
   if (*sock == SRT_INVALID_SOCK) {

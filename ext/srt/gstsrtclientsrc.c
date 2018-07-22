@@ -222,8 +222,8 @@ cancelled:
 }
 
 static gboolean
-gst_srt_client_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
-    SRTSOCKET * sock, gint * poll_id)
+gst_srt_client_src_open (GstSRTBaseSrc * src, GCancellable * cancellable,
+    const gchar * host, guint port, SRTSOCKET * sock, gint * poll_id)
 {
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (src);
   GstSRTClientSrcPrivate *priv = self->priv;
@@ -232,7 +232,7 @@ gst_srt_client_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
   const gchar *passphrase = gst_srt_base_src_get_passphrase (src);
   gint key_len = gst_srt_base_src_get_key_length (src);
 
-  *sock = gst_srt_client_connect (GST_ELEMENT (src), FALSE,
+  *sock = gst_srt_client_connect (GST_ELEMENT (src), cancellable, FALSE,
       host, port, priv->rendez_vous,
       priv->bind_address, priv->bind_port, latency,
       &socket_address, poll_id, passphrase, key_len);

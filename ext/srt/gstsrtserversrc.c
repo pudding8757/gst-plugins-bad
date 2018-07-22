@@ -246,8 +246,8 @@ cancelled:
 }
 
 static gboolean
-gst_srt_server_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
-    SRTSOCKET * sock, gint * poll_id)
+gst_srt_server_src_open (GstSRTBaseSrc * src, GCancellable * cancellable,
+    const gchar * host, guint port, SRTSOCKET * sock, gint * poll_id)
 {
   gint latency = gst_srt_base_src_get_latency (src);
   const gchar *passphrase = gst_srt_base_src_get_passphrase (src);
@@ -258,7 +258,7 @@ gst_srt_server_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
     return FALSE;
   }
 
-  *sock = gst_srt_server_listen (GST_ELEMENT (src),
+  *sock = gst_srt_server_listen (GST_ELEMENT (src), cancellable,
       FALSE, host, port, latency, poll_id, passphrase, key_len);
 
   if (*sock == SRT_INVALID_SOCK) {

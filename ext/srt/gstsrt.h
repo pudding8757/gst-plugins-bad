@@ -29,7 +29,7 @@
 
 #define SRT_URI_SCHEME "srt"
 #define SRT_DEFAULT_PORT 7001
-#define SRT_DEFAULT_HOST "127.0.0.1"
+#define SRT_DEFAULT_HOST "localhost"
 #define SRT_DEFAULT_URI SRT_URI_SCHEME"://"SRT_DEFAULT_HOST":"G_STRINGIFY(SRT_DEFAULT_PORT)
 #define SRT_DEFAULT_LATENCY 125
 #define SRT_DEFAULT_KEY_LENGTH 16
@@ -37,16 +37,16 @@
 G_BEGIN_DECLS
 
 SRTSOCKET
-gst_srt_client_connect (GstElement * elem, int sender,
-    const gchar * host, guint16 port, int rendez_vous,
+gst_srt_client_connect (GstElement * elem, GCancellable * cancellable,
+    int sender, const gchar * host, guint16 port, int rendez_vous,
     const gchar * bind_address, guint16 bind_port, int latency,
     GSocketAddress ** socket_address, gint * poll_id,
     const gchar * passphrase, int key_length);
 
 SRTSOCKET
-gst_srt_server_listen (GstElement * elem, int sender,
-    const gchar * host, guint16 port, gint latency, gint * poll_id,
-    const gchar * passphrase, int key_length);
+gst_srt_server_listen (GstElement * elem, GCancellable * cancellable,
+    int sender, const gchar * host, guint16 port, gint latency,
+    gint * poll_id, const gchar * passphrase, int key_length);
 
 G_END_DECLS
 

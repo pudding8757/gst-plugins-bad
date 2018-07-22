@@ -224,7 +224,7 @@ gst_srt_base_src_start (GstBaseSrc * src)
   }
 
   uri = gst_uri_ref (priv->uri);
-  ret = bclass->open (self,
+  ret = bclass->open (self, priv->cancellable,
       gst_uri_get_host (uri), gst_uri_get_port (uri), &sock, &poll_id);
 
   if (!ret)

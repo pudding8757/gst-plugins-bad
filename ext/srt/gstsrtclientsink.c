@@ -50,19 +50,12 @@
 
 #define SRT_DEFAULT_POLL_TIMEOUT -1
 
-static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY);
-
 #define GST_CAT_DEFAULT gst_debug_srt_client_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
 struct _GstSRTClientSinkPrivate
 {
-  SRTSOCKET sock;
   GSocketAddress *sockaddr;
-  gint poll_id;
   gint poll_timeout;
 
   gboolean rendez_vous;
@@ -77,7 +70,7 @@ struct _GstSRTClientSinkPrivate
 
 enum
 {
-  PROP_POLL_TIMEOUT = 1,
+  PROP_POLL_TIMEOUT = 1,        /* FIXME: need this ? */
   PROP_BIND_ADDRESS,
   PROP_BIND_PORT,
   PROP_RENDEZ_VOUS,
@@ -99,7 +92,7 @@ gst_srt_client_sink_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
-  GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
+  GstSRTClientSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -116,7 +109,7 @@ gst_srt_client_sink_get_property (GObject * object,
       break;
     case PROP_STATS:
       g_value_take_boxed (value, gst_srt_base_sink_get_stats (priv->sockaddr,
-              priv->sock));
+              GST_SRT_BASE_SINK_SOCKET (self)));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -129,7 +122,7 @@ gst_srt_client_sink_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
-  GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
+  GstSRTClientSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -151,22 +144,38 @@ gst_srt_client_sink_set_property (GObject * object,
   }
 }
 
+static void
+gst_srt_client_sink_finalize (GObject * object)
+{
+  GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
+  GstSRTClientSinkPrivate *priv = self->priv;
+
+  g_free (priv->bind_address);
+
+  if (priv->sockaddr) {
+    g_object_unref (priv->sockaddr);
+    priv->sockaddr = NULL;
+  }
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
 static gboolean
-gst_srt_client_sink_start (GstBaseSink * sink)
+gst_srt_client_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
+    SRTSOCKET * sock, gint * poll_id)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
-  GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
-  GstSRTBaseSink *base = GST_SRT_BASE_SINK (sink);
-  GstUri *uri = gst_uri_ref (GST_SRT_BASE_SINK (self)->uri);
+  GstSRTClientSinkPrivate *priv = self->priv;
+  gint latency = gst_srt_base_sink_get_latency (sink);
+  const gchar *passphrase = gst_srt_base_sink_get_passphrase (sink);
+  gint key_len = gst_srt_base_sink_get_key_length (sink);
 
-  priv->sock = gst_srt_client_connect (GST_ELEMENT (sink), FALSE,
-      gst_uri_get_host (uri), gst_uri_get_port (uri), priv->rendez_vous,
-      priv->bind_address, priv->bind_port, base->latency,
-      &priv->sockaddr, &priv->poll_id, base->passphrase, base->key_length);
+  *sock = gst_srt_client_connect (GST_ELEMENT (sink), FALSE,
+      host, port, priv->rendez_vous,
+      priv->bind_address, priv->bind_port, latency,
+      &priv->sockaddr, poll_id, passphrase, key_len);
 
-  g_clear_pointer (&uri, gst_uri_unref);
-
-  return (priv->sock != SRT_INVALID_SOCK);
+  return (*sock != SRT_INVALID_SOCK);
 }
 
 static gboolean
@@ -190,43 +199,18 @@ gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink,
     const GstMapInfo * mapinfo)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
-  GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
+  GstSRTClientSinkPrivate *priv = self->priv;
+  SRTSOCKET sock = GST_SRT_BASE_SINK_SOCKET (sink);
 
   if (!priv->sent_headers) {
     if (!gst_srt_base_sink_send_headers (sink, send_buffer_internal,
-            GINT_TO_POINTER (priv->sock)))
+            GINT_TO_POINTER (sock)))
       return FALSE;
 
     priv->sent_headers = TRUE;
   }
 
-  return send_buffer_internal (sink, mapinfo, GINT_TO_POINTER (priv->sock));
-}
-
-static gboolean
-gst_srt_client_sink_stop (GstBaseSink * sink)
-{
-  GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
-  GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
-
-  GST_DEBUG_OBJECT (self, "closing SRT connection");
-
-  if (priv->poll_id != SRT_ERROR) {
-    srt_epoll_remove_usock (priv->poll_id, priv->sock);
-    srt_epoll_release (priv->poll_id);
-    priv->poll_id = SRT_ERROR;
-  }
-
-  if (priv->sock != SRT_INVALID_SOCK) {
-    srt_close (priv->sock);
-    priv->sock = SRT_INVALID_SOCK;
-  }
-
-  g_clear_object (&priv->sockaddr);
-
-  priv->sent_headers = FALSE;
-
-  return GST_BASE_SINK_CLASS (parent_class)->stop (sink);
+  return send_buffer_internal (sink, mapinfo, GINT_TO_POINTER (sock));
 }
 
 static void
@@ -234,11 +218,11 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
-  GstBaseSinkClass *gstbasesink_class = GST_BASE_SINK_CLASS (klass);
   GstSRTBaseSinkClass *gstsrtbasesink_class = GST_SRT_BASE_SINK_CLASS (klass);
 
   gobject_class->set_property = gst_srt_client_sink_set_property;
   gobject_class->get_property = gst_srt_client_sink_get_property;
+  gobject_class->finalize = gst_srt_client_sink_finalize;
 
   properties[PROP_POLL_TIMEOUT] =
       g_param_spec_int ("poll-timeout", "Poll Timeout",
@@ -268,15 +252,12 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
   gst_element_class_set_metadata (gstelement_class,
       "SRT client sink", "Sink/Network",
       "Send data over the network via SRT",
       "Justin Kim <justin.kim@collabora.com>");
 
-  gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_srt_client_sink_start);
-  gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_client_sink_stop);
-
+  gstsrtbasesink_class->open = GST_DEBUG_FUNCPTR (gst_srt_client_sink_open);
   gstsrtbasesink_class->send_buffer =
       GST_DEBUG_FUNCPTR (gst_srt_client_sink_send_buffer);
 }
@@ -286,4 +267,6 @@ gst_srt_client_sink_init (GstSRTClientSink * self)
 {
   GstSRTClientSinkPrivate *priv = GST_SRT_CLIENT_SINK_GET_PRIVATE (self);
   priv->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
+
+  self->priv = priv;
 }

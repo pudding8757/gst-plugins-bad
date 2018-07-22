@@ -26,10 +26,25 @@
 #include "gstsrt.h"
 #include <srt/srt.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
+static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
 
 #define GST_CAT_DEFAULT gst_debug_srt_base_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
+
+struct _GstSRTBaseSinkPrivate
+{
+  GstUri *uri;
+  GstBufferList *headers;
+  gint latency;
+  gchar *passphrase;
+  gint key_length;
+};
+
+#define GST_SRT_BASE_SINK_GET_PRIVATE(obj)  \
+       (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_SRT_BASE_SINK, GstSRTBaseSinkPrivate))
 
 enum
 {
@@ -50,35 +65,37 @@ static gchar *gst_srt_base_sink_uri_get_uri (GstURIHandler * handler);
 static gboolean gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
     const gchar * uri, GError ** error);
 
+#define _do_init \
+  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtbasesink", 0, "SRT Base Sink")
+
 #define gst_srt_base_sink_parent_class parent_class
 G_DEFINE_ABSTRACT_TYPE_WITH_CODE (GstSRTBaseSink, gst_srt_base_sink,
-    GST_TYPE_BASE_SINK,
+    GST_TYPE_BASE_SINK, G_ADD_PRIVATE (GstSRTBaseSink)
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
-        gst_srt_base_sink_uri_handler_init)
-    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtbasesink", 0,
-        "SRT Base Sink"));
+        gst_srt_base_sink_uri_handler_init) _do_init);
 
 static void
 gst_srt_base_sink_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
+  GstSRTBaseSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_URI:
-      if (self->uri != NULL) {
+      if (priv->uri != NULL) {
         gchar *uri_str = gst_srt_base_sink_uri_get_uri (GST_URI_HANDLER (self));
         g_value_take_string (value, uri_str);
       }
       break;
     case PROP_LATENCY:
-      g_value_set_int (value, self->latency);
+      g_value_set_int (value, priv->latency);
       break;
     case PROP_PASSPHRASE:
-      g_value_set_string (value, self->passphrase);
+      g_value_set_string (value, priv->passphrase);
       break;
     case PROP_KEY_LENGTH:
-      g_value_set_int (value, self->key_length);
+      g_value_set_int (value, priv->key_length);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -91,6 +108,7 @@ gst_srt_base_sink_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
+  GstSRTBaseSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_URI:
@@ -98,18 +116,18 @@ gst_srt_base_sink_set_property (GObject * object,
           g_value_get_string (value), NULL);
       break;
     case PROP_LATENCY:
-      self->latency = g_value_get_int (value);
+      priv->latency = g_value_get_int (value);
       break;
     case PROP_PASSPHRASE:
-      g_free (self->passphrase);
-      self->passphrase = g_value_dup_string (value);
+      g_free (priv->passphrase);
+      priv->passphrase = g_value_dup_string (value);
       break;
     case PROP_KEY_LENGTH:
     {
       gint key_length = g_value_get_int (value);
       g_return_if_fail (key_length == 16 || key_length == 24
           || key_length == 32);
-      self->key_length = key_length;
+      priv->key_length = key_length;
       break;
     }
     default:
@@ -122,10 +140,11 @@ static void
 gst_srt_base_sink_finalize (GObject * object)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
+  GstSRTBaseSinkPrivate *priv = self->priv;
 
-  g_clear_pointer (&self->headers, gst_buffer_list_unref);
-  g_clear_pointer (&self->uri, gst_uri_unref);
-  g_clear_pointer (&self->passphrase, g_free);
+  g_clear_pointer (&priv->headers, gst_buffer_list_unref);
+  g_clear_pointer (&priv->uri, gst_uri_unref);
+  g_clear_pointer (&priv->passphrase, g_free);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -134,12 +153,13 @@ static gboolean
 gst_srt_base_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+  GstSRTBaseSinkPrivate *priv = self->priv;
   GstStructure *s;
   const GValue *streamheader;
 
   GST_DEBUG_OBJECT (self, "setcaps %" GST_PTR_FORMAT, caps);
 
-  g_clear_pointer (&self->headers, gst_buffer_list_unref);
+  g_clear_pointer (&priv->headers, gst_buffer_list_unref);
 
   s = gst_caps_get_structure (caps, 0);
   streamheader = gst_structure_get_value (s, "streamheader");
@@ -148,15 +168,15 @@ gst_srt_base_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
     GST_DEBUG_OBJECT (self, "'streamheader' field not present");
   } else if (GST_VALUE_HOLDS_BUFFER (streamheader)) {
     GST_DEBUG_OBJECT (self, "'streamheader' field holds buffer");
-    self->headers = gst_buffer_list_new_sized (1);
-    gst_buffer_list_add (self->headers, g_value_dup_boxed (streamheader));
+    priv->headers = gst_buffer_list_new_sized (1);
+    gst_buffer_list_add (priv->headers, g_value_dup_boxed (streamheader));
   } else if (GST_VALUE_HOLDS_ARRAY (streamheader)) {
     guint i, size;
 
     GST_DEBUG_OBJECT (self, "'streamheader' field holds array");
 
     size = gst_value_array_get_size (streamheader);
-    self->headers = gst_buffer_list_new_sized (size);
+    priv->headers = gst_buffer_list_new_sized (size);
 
     for (i = 0; i < size; i++) {
       const GValue *v = gst_value_array_get_value (streamheader, i);
@@ -166,7 +186,7 @@ gst_srt_base_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
         return FALSE;
       }
 
-      gst_buffer_list_add (self->headers, g_value_dup_boxed (v));
+      gst_buffer_list_add (priv->headers, g_value_dup_boxed (v));
     }
   } else {
     GST_ERROR_OBJECT (self, "'streamheader' field has unexpected type '%s'",
@@ -175,17 +195,84 @@ gst_srt_base_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   }
 
   GST_DEBUG_OBJECT (self, "Collected streamheaders: %u buffers",
-      self->headers ? gst_buffer_list_length (self->headers) : 0);
+      priv->headers ? gst_buffer_list_length (priv->headers) : 0);
 
   return TRUE;
+}
+
+static gboolean
+gst_srt_base_sink_start (GstBaseSink * sink)
+{
+  GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+  GstSRTBaseSinkPrivate *priv = self->priv;
+  GstSRTBaseSinkClass *bclass = GST_SRT_BASE_SINK_GET_CLASS (self);
+  SRTSOCKET sock = SRT_INVALID_SOCK;
+  gint poll_id = SRT_ERROR;
+  GstUri *uri = NULL;
+  gboolean ret;
+
+  if (G_UNLIKELY (priv->uri == NULL)) {
+    GST_ERROR_OBJECT (sink, "NULL uri");
+    return FALSE;
+  }
+
+  if (G_UNLIKELY (!bclass->open)) {
+    GST_ERROR_OBJECT (sink, "Implement open vfunc");
+    return FALSE;
+  }
+
+  uri = gst_uri_ref (priv->uri);
+  ret = bclass->open (self,
+      gst_uri_get_host (uri), gst_uri_get_port (uri), &sock, &poll_id);
+
+  if (!ret)
+    goto failed;
+
+  self->sock = sock;
+  self->poll_id = poll_id;
+
+  gst_uri_unref (uri);
+
+  return TRUE;
+
+failed:
+  if (poll_id != SRT_ERROR)
+    srt_epoll_release (poll_id);
+
+  if (sock != SRT_ERROR)
+    srt_close (sock);
+
+  if (uri)
+    gst_uri_unref (uri);
+
+  return FALSE;
 }
 
 static gboolean
 gst_srt_base_sink_stop (GstBaseSink * sink)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+  GstSRTBaseSinkPrivate *priv = self->priv;
+  GstSRTBaseSinkClass *bclass = GST_SRT_BASE_SINK_GET_CLASS (self);
 
-  g_clear_pointer (&self->headers, gst_buffer_list_unref);
+  GST_DEBUG_OBJECT (self, "closing SRT connection");
+
+  if (bclass->close)
+    bclass->close (self);
+
+  g_clear_pointer (&priv->headers, gst_buffer_list_unref);
+
+  if (self->poll_id != SRT_ERROR) {
+    if (self->sock != SRT_INVALID_SOCK)
+      srt_epoll_remove_usock (self->poll_id, self->sock);
+    srt_epoll_release (self->poll_id);
+    self->poll_id = SRT_ERROR;
+  }
+
+  if (self->sock != SRT_INVALID_SOCK) {
+    srt_close (self->sock);
+    self->sock = SRT_INVALID_SOCK;
+  }
 
   return TRUE;
 }
@@ -194,11 +281,12 @@ static GstFlowReturn
 gst_srt_base_sink_render (GstBaseSink * sink, GstBuffer * buffer)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+  GstSRTBaseSinkPrivate *priv = self->priv;
   GstMapInfo info;
   GstSRTBaseSinkClass *bclass = GST_SRT_BASE_SINK_GET_CLASS (sink);
   GstFlowReturn ret = GST_FLOW_OK;
 
-  if (self->headers && GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_HEADER)) {
+  if (priv->headers && GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_HEADER)) {
     GST_DEBUG_OBJECT (self, "Have streamheaders,"
         " ignoring header %" GST_PTR_FORMAT, buffer);
     return GST_FLOW_OK;
@@ -232,6 +320,7 @@ static void
 gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSinkClass *gstbasesink_class = GST_BASE_SINK_CLASS (klass);
 
   gobject_class->set_property = gst_srt_base_sink_set_property;
@@ -264,7 +353,10 @@ gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
+  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
+
   gstbasesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_srt_base_sink_set_caps);
+  gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_srt_base_sink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_base_sink_stop);
   gstbasesink_class->render = GST_DEBUG_FUNCPTR (gst_srt_base_sink_render);
 }
@@ -272,10 +364,14 @@ gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 static void
 gst_srt_base_sink_init (GstSRTBaseSink * self)
 {
-  self->uri = gst_uri_from_string (SRT_DEFAULT_URI);
-  self->latency = SRT_DEFAULT_LATENCY;
-  self->passphrase = NULL;
-  self->key_length = SRT_DEFAULT_KEY_LENGTH;
+  GstSRTBaseSinkPrivate *priv = GST_SRT_BASE_SINK_GET_PRIVATE (self);
+
+  priv->uri = gst_uri_from_string (SRT_DEFAULT_URI);
+  priv->latency = SRT_DEFAULT_LATENCY;
+  priv->passphrase = NULL;
+  priv->key_length = SRT_DEFAULT_KEY_LENGTH;
+
+  self->priv = priv;
 }
 
 static GstURIType
@@ -297,9 +393,10 @@ gst_srt_base_sink_uri_get_uri (GstURIHandler * handler)
 {
   gchar *uri_str;
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (handler);
+  GstSRTBaseSinkPrivate *priv = GST_SRT_BASE_SINK_GET_PRIVATE (self);
 
   GST_OBJECT_LOCK (self);
-  uri_str = gst_uri_to_string (self->uri);
+  uri_str = gst_uri_to_string (priv->uri);
   GST_OBJECT_UNLOCK (self);
 
   return uri_str;
@@ -310,6 +407,7 @@ gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
     const gchar * uri, GError ** error)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (handler);
+  GstSRTBaseSinkPrivate *priv = GST_SRT_BASE_SINK_GET_PRIVATE (self);
   gboolean ret = TRUE;
   GstUri *parsed_uri = gst_uri_from_string (uri);
 
@@ -324,8 +422,8 @@ gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
 
   GST_OBJECT_LOCK (self);
 
-  g_clear_pointer (&self->uri, gst_uri_unref);
-  self->uri = gst_uri_ref (parsed_uri);
+  g_clear_pointer (&priv->uri, gst_uri_unref);
+  priv->uri = gst_uri_ref (parsed_uri);
 
   GST_OBJECT_UNLOCK (self);
 
@@ -349,20 +447,23 @@ gboolean
 gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
     GstSRTBaseSinkSendCallback send_cb, gpointer user_data)
 {
+  GstSRTBaseSinkPrivate *priv;
   guint size, i;
 
   g_return_val_if_fail (GST_IS_SRT_BASE_SINK (self), FALSE);
   g_return_val_if_fail (send_cb, FALSE);
 
-  if (!self->headers)
+  priv = self->priv;
+
+  if (!priv->headers)
     return TRUE;
 
-  size = gst_buffer_list_length (self->headers);
+  size = gst_buffer_list_length (priv->headers);
 
   GST_DEBUG_OBJECT (self, "Sending %u stream headers", size);
 
   for (i = 0; i < size; i++) {
-    GstBuffer *buffer = gst_buffer_list_get (self->headers, i);
+    GstBuffer *buffer = gst_buffer_list_get (priv->headers, i);
     GstMapInfo info;
     gboolean ret;
 
@@ -438,4 +539,28 @@ gst_srt_base_sink_get_stats (GSocketAddress * sockaddr, SRTSOCKET sock)
   gst_structure_take_value (s, "sockaddr-str", &v);
 
   return s;
+}
+
+gint
+gst_srt_base_sink_get_latency (GstSRTBaseSink * sink)
+{
+  GstSRTBaseSinkPrivate *priv = sink->priv;
+
+  return priv->latency;
+}
+
+const gchar *
+gst_srt_base_sink_get_passphrase (GstSRTBaseSink * sink)
+{
+  GstSRTBaseSinkPrivate *priv = sink->priv;
+
+  return priv->passphrase;
+}
+
+gint
+gst_srt_base_sink_get_key_length (GstSRTBaseSink * sink)
+{
+  GstSRTBaseSinkPrivate *priv = sink->priv;
+
+  return priv->key_length;
 }

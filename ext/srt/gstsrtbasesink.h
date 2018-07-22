@@ -38,19 +38,23 @@ G_BEGIN_DECLS
 #define GST_SRT_BASE_SINK_CAST(obj)         ((GstSRTBaseSink*)(obj))
 #define GST_SRT_BASE_SINK_CLASS_CAST(klass) ((GstSRTBaseSinkClass*)(klass))
 
+#define GST_SRT_BASE_SINK_SOCKET(obj)       (GST_SRT_BASE_SINK_CAST(obj)->sock)
+#define GST_SRT_BASE_SINK_POLL_ID(obj)      (GST_SRT_BASE_SINK_CAST(obj)->poll_id)
+
 typedef struct _GstSRTBaseSink GstSRTBaseSink;
 typedef struct _GstSRTBaseSinkClass GstSRTBaseSinkClass;
+typedef struct _GstSRTBaseSinkPrivate GstSRTBaseSinkPrivate;
 
 struct _GstSRTBaseSink {
   GstBaseSink parent;
 
-  GstUri *uri;
-  GstBufferList *headers;
-  gint latency;
-  gchar *passphrase;
-  gint key_length;
+  /*< protected >*/
+  SRTSOCKET sock;
+  gint poll_id;
 
   /*< private >*/
+  GstSRTBaseSinkPrivate *priv;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 
@@ -59,6 +63,10 @@ struct _GstSRTBaseSinkClass {
 
   /* ask the subclass to send a buffer */
   gboolean (*send_buffer)       (GstSRTBaseSink *self, const GstMapInfo *mapinfo);
+
+  gboolean (*open)    (GstSRTBaseSink *self, const gchar * host, guint port,
+                       SRTSOCKET *sock, gint *poll_id);
+  gboolean (*close)   (GstSRTBaseSink *self);
 
   gpointer _gst_reserved[GST_PADDING_LARGE];
 };
@@ -75,6 +83,11 @@ gboolean gst_srt_base_sink_send_headers (GstSRTBaseSink *sink,
 GstStructure * gst_srt_base_sink_get_stats (GSocketAddress *sockaddr,
     SRTSOCKET sock);
 
+gint          gst_srt_base_sink_get_latency (GstSRTBaseSink *sink);
+
+const gchar * gst_srt_base_sink_get_passphrase (GstSRTBaseSink *sink);
+
+gint          gst_srt_base_sink_get_key_length (GstSRTBaseSink *sink);
 
 G_END_DECLS
 

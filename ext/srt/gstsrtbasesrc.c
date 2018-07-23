@@ -43,6 +43,8 @@ struct _GstSRTBaseSrcPrivate
 
   GCancellable *cancellable;
   int cancellable_fd;
+
+  GstClockTime start_timestamp;
 };
 
 #define GST_SRT_BASE_SRC_GET_PRIVATE(obj)  \
@@ -374,6 +376,7 @@ gst_srt_base_src_init (GstSRTBaseSrc * self)
   priv->key_length = SRT_DEFAULT_KEY_LENGTH;
   priv->cancellable = g_cancellable_new ();
   priv->cancellable_fd = -1;
+  priv->start_timestamp = GST_CLOCK_TIME_NONE;
 
   self->priv = priv;
 
@@ -478,4 +481,77 @@ gst_srt_base_src_is_cancelled (GstSRTBaseSrc * src)
   GstSRTBaseSrcPrivate *priv = src->priv;
 
   return g_cancellable_is_cancelled (priv->cancellable);
+}
+
+void
+gst_srt_base_src_do_timestamp (GstSRTBaseSrc * src, GstBuffer * buffer,
+    SRT_MSGCTRL * mc)
+{
+  GstSRTBaseSrcPrivate *priv;
+  GstClockTime srttime_to_gst;
+  GstClockTime now;
+  static GstStaticCaps src_reference =
+      GST_STATIC_CAPS ("timestamp/x-srt-srctime");
+
+  g_return_if_fail (src != NULL);
+  g_return_if_fail (buffer != NULL);
+  g_return_if_fail (mc != NULL);
+
+  priv = src->priv;
+
+#ifndef GST_DISABLE_GST_DEBUG
+  /* The SRT srctime parameter is the number of usec (since epoch) in local time */
+  {
+    GstDateTime *src_datatime =
+        gst_date_time_new_from_unix_epoch_local_time (mc->srctime / 1000000);
+    if (src_datatime) {
+      gchar *readable_src_datatime =
+          gst_date_time_to_iso8601_string (src_datatime);
+
+      GST_LOG_OBJECT (src, "SRT srctime : %s", readable_src_datatime);
+      gst_date_time_unref (src_datatime);
+      g_free (readable_src_datatime);
+    }
+  }
+#endif
+
+  srttime_to_gst = mc->srctime * GST_USECOND;
+
+  if (G_UNLIKELY (priv->start_timestamp == GST_CLOCK_TIME_NONE))
+    priv->start_timestamp = srttime_to_gst;
+
+  /* Add GstReferenceTimestampMeta for application (only change timescale to nanosec) */
+  gst_buffer_add_reference_timestamp_meta (buffer,
+      gst_static_caps_get (&src_reference), srttime_to_gst,
+      GST_CLOCK_TIME_NONE);
+
+  if (srttime_to_gst != 0) {
+    if (srttime_to_gst > priv->start_timestamp)
+      now = srttime_to_gst - priv->start_timestamp;
+    else
+      now = 0;
+  } else {
+    GstClock *clock;
+
+    clock = gst_element_get_clock (GST_ELEMENT_CAST (src));
+
+    if (clock) {
+      GstClockTime base_time =
+          gst_element_get_base_time (GST_ELEMENT_CAST (src));
+
+      now = gst_clock_get_time (clock);
+      if (now > base_time)
+        now -= base_time;
+      else
+        now = 0;
+      gst_object_unref (clock);
+    } else {
+      GST_WARNING_OBJECT (src, "No available clock source for timestamp");
+      now = GST_CLOCK_TIME_NONE;
+    }
+  }
+
+  GST_BUFFER_PTS (buffer) = now;
+
+  return;
 }

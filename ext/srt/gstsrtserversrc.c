@@ -138,6 +138,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   gint recv_len;
   struct sockaddr client_sa;
   size_t client_sa_len;
+  SRT_MSGCTRL mc = srt_msgctrl_default;
 
   if (gst_srt_base_src_is_cancelled (GST_SRT_BASE_SRC (src)))
     goto cancelled;
@@ -202,8 +203,8 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     return GST_FLOW_ERROR;
   }
 
-  recv_len = srt_recvmsg (priv->client_sock, (char *) info.data,
-      gst_buffer_get_size (outbuf));
+  recv_len = srt_recvmsg2 (priv->client_sock, (char *) info.data,
+      gst_buffer_get_size (outbuf), &mc);
 
   gst_buffer_unmap (outbuf, &info);
 
@@ -223,9 +224,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     return GST_FLOW_EOS;
   }
 
-  GST_BUFFER_PTS (outbuf) =
-      gst_clock_get_time (GST_ELEMENT_CLOCK (src)) -
-      GST_ELEMENT_CAST (src)->base_time;
+  gst_srt_base_src_do_timestamp (GST_SRT_BASE_SRC (src), outbuf, &mc);
 
   gst_buffer_resize (outbuf, 0, recv_len);
 

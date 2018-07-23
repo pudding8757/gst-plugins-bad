@@ -79,6 +79,10 @@ gint          gst_srt_base_src_get_key_length (GstSRTBaseSrc *src);
 
 gboolean      gst_srt_base_src_is_cancelled (GstSRTBaseSrc *src);
 
+void          gst_srt_base_src_do_timestamp (GstSRTBaseSrc * src,
+                                             GstBuffer * buffer,
+                                             SRT_MSGCTRL * mc);
+
 G_END_DECLS
 
 #endif /* __GST_SRT_BASE_SRC_H__ */

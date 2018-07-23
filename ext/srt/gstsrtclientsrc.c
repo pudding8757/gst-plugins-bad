@@ -174,6 +174,7 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   GstMapInfo info;
   SRTSOCKET ready[2];
   gint recv_len;
+  SRT_MSGCTRL mc = srt_msgctrl_default;
 
   if (srt_epoll_wait (priv->poll_id, 0, 0, ready, &(int) {
           2}, priv->poll_timeout, 0, 0, 0, 0) == -1) {
@@ -195,8 +196,8 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     goto out;
   }
 
-  recv_len = srt_recvmsg (priv->sock, (char *) info.data,
-      gst_buffer_get_size (outbuf));
+  recv_len = srt_recvmsg2 (priv->sock, (char *) info.data,
+      gst_buffer_get_size (outbuf), &mc);
 
   gst_buffer_unmap (outbuf, &info);
 
@@ -210,9 +211,7 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     goto out;
   }
 
-  GST_BUFFER_PTS (outbuf) =
-      gst_clock_get_time (GST_ELEMENT_CLOCK (src)) -
-      GST_ELEMENT_CAST (src)->base_time;
+  gst_srt_base_src_do_timestamp (GST_SRT_BASE_SRC (src), outbuf, &mc);
 
   gst_buffer_resize (outbuf, 0, recv_len);
 

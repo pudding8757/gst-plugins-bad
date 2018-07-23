@@ -159,6 +159,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   gint recv_len;
   struct sockaddr client_sa;
   size_t client_sa_len;
+  SRT_MSGCTRL mc = srt_msgctrl_default;
 
   while (!priv->has_client) {
     GST_DEBUG_OBJECT (self, "poll wait (timeout: %d)", priv->poll_timeout);
@@ -216,8 +217,8 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     goto out;
   }
 
-  recv_len = srt_recvmsg (priv->client_sock, (char *) info.data,
-      gst_buffer_get_size (outbuf));
+  recv_len = srt_recvmsg2 (priv->client_sock, (char *) info.data,
+      gst_buffer_get_size (outbuf), &mc);
 
   gst_buffer_unmap (outbuf, &info);
 
@@ -239,9 +240,7 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
     goto out;
   }
 
-  GST_BUFFER_PTS (outbuf) =
-      gst_clock_get_time (GST_ELEMENT_CLOCK (src)) -
-      GST_ELEMENT_CAST (src)->base_time;
+  gst_srt_base_src_do_timestamp (GST_SRT_BASE_SRC (src), outbuf, &mc);
 
   gst_buffer_resize (outbuf, 0, recv_len);
 

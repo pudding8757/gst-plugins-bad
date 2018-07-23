@@ -23,6 +23,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstpushsrc.h>
+#include <srt/srt.h>
 
 G_BEGIN_DECLS
 
@@ -49,6 +50,8 @@ struct _GstSRTBaseSrc {
 
 
   /*< private >*/
+  GstClockTime start_timestamp;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 
@@ -60,6 +63,10 @@ struct _GstSRTBaseSrcClass {
 
 GST_EXPORT
 GType gst_srt_base_src_get_type (void);
+
+void          gst_srt_base_src_do_timestamp (GstSRTBaseSrc * src,
+                                             GstBuffer * buffer,
+                                             SRT_MSGCTRL * mc);
 
 G_END_DECLS
 

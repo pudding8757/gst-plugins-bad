@@ -470,7 +470,6 @@ gst_srt_server_sink_stop (GstBaseSink * sink)
     g_main_loop_quit (priv->loop);
     g_thread_join (priv->thread);
     g_clear_pointer (&priv->loop, g_main_loop_unref);
-    g_clear_pointer (&priv->thread, g_thread_unref);
   }
 
   if (priv->server_source) {

@@ -46,7 +46,13 @@ struct _GstSRTServerSink {
   GSource *server_source;
   GThread *thread;
 
-  GList *clients;
+  GstTask *event_task;
+  GRecMutex event_lock;
+  GMutex clients_lock;
+  GCond clients_cond;
+
+  GHashTable *client_hash;
+  gboolean need_data;
 };
 
 struct _GstSRTServerSinkClass {

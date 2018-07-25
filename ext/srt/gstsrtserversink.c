@@ -71,11 +71,26 @@ G_DEFINE_TYPE_WITH_CODE (GstSRTServerSink, gst_srt_server_sink,
     GST_TYPE_SRT_BASE_SINK, GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT,
         "srtserversink", 0, "SRT Server Sink"));
 
+#define CLIENTS_GET_LOCK(s) (&(GST_SRT_SERVER_SINK_CAST(s)->clients_lock))
+#define CLIENTS_LOCK(d) G_STMT_START { \
+    GST_TRACE_OBJECT(d, "Locking from thread %p", g_thread_self()); \
+    g_mutex_lock (CLIENTS_GET_LOCK (d)); \
+    GST_TRACE_OBJECT(d, "Locked from thread %p", g_thread_self()); \
+ } G_STMT_END
+
+#define CLIENTS_UNLOCK(d) G_STMT_START { \
+    GST_TRACE_OBJECT(d, "Unlocking from thread %p", g_thread_self()); \
+    g_mutex_unlock (CLIENTS_GET_LOCK (d)); \
+ } G_STMT_END
+
 typedef struct
 {
   SRTSOCKET sock;
   GSocketAddress *sockaddr;
   gboolean sent_headers;
+  GPtrArray *bufqueue;
+
+  gint ref_count;
 } SRTClient;
 
 static SRTClient *
@@ -83,31 +98,109 @@ srt_client_new (void)
 {
   SRTClient *client = g_new0 (SRTClient, 1);
   client->sock = SRT_INVALID_SOCK;
+  client->bufqueue =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) gst_buffer_unref);
+
+  client->ref_count = 1;
+
+  return client;
+}
+
+static SRTClient *
+srt_client_ref (SRTClient * client)
+{
+  g_return_val_if_fail (client != NULL && client->ref_count > 0, NULL);
+
+  g_atomic_int_add (&client->ref_count, 1);
+
   return client;
 }
 
 static void
-srt_client_free (SRTClient * client)
+srt_client_unref (SRTClient * client)
 {
-  g_return_if_fail (client != NULL);
+  g_return_if_fail (client != NULL && client->ref_count > 0);
 
-  g_clear_object (&client->sockaddr);
+  if (g_atomic_int_dec_and_test (&client->ref_count)) {
+    g_clear_object (&client->sockaddr);
 
-  if (client->sock != SRT_INVALID_SOCK) {
-    srt_close (client->sock);
+    if (client->sock != SRT_INVALID_SOCK) {
+      srt_close (client->sock);
+    }
+
+    g_ptr_array_free (client->bufqueue, TRUE);
+    g_free (client);
   }
-
-  g_free (client);
 }
 
 static void
-srt_emit_client_removed (SRTClient * client, gpointer user_data)
+gst_srt_server_sink_add_client (GstSRTServerSink * self, SRTClient * client)
 {
-  GstSRTServerSink *self = GST_SRT_SERVER_SINK (user_data);
-  g_return_if_fail (client != NULL && GST_IS_SRT_SERVER_SINK (self));
+  int epoll_event = SRT_EPOLL_ERR;
+  int poll_id = GST_SRT_BASE_SINK (self)->poll_id;
+
+  GST_DEBUG_OBJECT (self, "Client added");
+
+  CLIENTS_LOCK (self);
+  if (poll_id != SRT_ERROR)
+    srt_epoll_add_usock (poll_id, client->sock, &epoll_event);
+
+  g_hash_table_insert (self->client_hash, &client->sock, client);
+  self->need_data = TRUE;
+  g_cond_broadcast (&self->clients_cond);
+  CLIENTS_UNLOCK (self);
+
+  g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0, client->sock,
+      client->sockaddr);
+}
+
+static void
+gst_srt_server_sink_remove_client (GstSRTServerSink * self, SRTClient * client,
+    gboolean remove_from_table)
+{
+  int poll_id = GST_SRT_BASE_SINK (self)->poll_id;
+
+  GST_DEBUG_OBJECT (self, "Client removed");
+
+  client = srt_client_ref (client);
+
+  CLIENTS_LOCK (self);
+  if (poll_id != SRT_ERROR)
+    srt_epoll_remove_usock (poll_id, client->sock);
+
+  if (remove_from_table) {
+    g_hash_table_remove (self->client_hash, &client->sock);
+  }
+  CLIENTS_UNLOCK (self);
 
   g_signal_emit (self, signals[SIG_CLIENT_REMOVED], 0, client->sock,
       client->sockaddr);
+  srt_client_unref (client);
+}
+
+static gboolean
+_client_hash_foreach_remove (gpointer key, gpointer value, gpointer user_data)
+{
+  GstSRTServerSink *self = GST_SRT_SERVER_SINK (user_data);
+  SRTClient *client = (SRTClient *) value;
+
+  gst_srt_server_sink_remove_client (self, client, FALSE);
+
+  return TRUE;
+}
+
+static void
+_client_hash_foreach_get_stats (gpointer key, gpointer value,
+    gpointer user_data)
+{
+  SRTClient *client = (SRTClient *) value;
+  GValue *prop_value = (GValue *) user_data;
+  GValue stat = G_VALUE_INIT;
+
+  g_value_init (&stat, GST_TYPE_STRUCTURE);
+  g_value_take_boxed (&stat, gst_srt_base_sink_get_stats (client->sockaddr,
+          client->sock));
+  gst_value_array_append_and_take_value (prop_value, &stat);
 }
 
 static void
@@ -119,19 +212,10 @@ gst_srt_server_sink_get_property (GObject * object,
   switch (prop_id) {
     case PROP_STATS:
     {
-      GList *item;
-
-      GST_OBJECT_LOCK (self);
-      for (item = self->clients; item; item = item->next) {
-        SRTClient *client = item->data;
-        GValue tmp = G_VALUE_INIT;
-
-        g_value_init (&tmp, GST_TYPE_STRUCTURE);
-        g_value_take_boxed (&tmp, gst_srt_base_sink_get_stats (client->sockaddr,
-                client->sock));
-        gst_value_array_append_and_take_value (value, &tmp);
-      }
-      GST_OBJECT_UNLOCK (self);
+      CLIENTS_LOCK (self);
+      g_hash_table_foreach (self->client_hash,
+          (GHFunc) _client_hash_foreach_get_stats, value);
+      CLIENTS_UNLOCK (self);
       break;
     }
     default:
@@ -151,20 +235,71 @@ gst_srt_server_sink_set_property (GObject * object,
   }
 }
 
-/* listen loop for accept client socket */
-static gboolean
-idle_listen_callback (gpointer data)
+static void
+gst_srt_server_sink_finalize (GObject * object)
 {
-  GstSRTBaseSink *sink = GST_SRT_BASE_SINK (data);
-  GstSRTServerSink *self = GST_SRT_SERVER_SINK (data);
-  SRTClient *client;
+  GstSRTServerSink *self = GST_SRT_SERVER_SINK (object);
+
+  g_rec_mutex_clear (&self->event_lock);
+  g_mutex_clear (&self->clients_lock);
+  g_cond_clear (&self->clients_cond);
+
+  if (self->client_hash)
+    g_hash_table_destroy (self->client_hash);
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
+static gboolean
+gst_srt_server_sink_start_sending (GstSRTServerSink * sink, SRTClient * client)
+{
+  int epoll_event = SRT_EPOLL_OUT | SRT_EPOLL_ERR;
+  int ret;
+
+  ret = srt_epoll_update_usock (GST_SRT_BASE_SINK (sink)->poll_id, client->sock,
+      &epoll_event);
+
+  return (ret != SRT_ERROR);
+}
+
+static gboolean
+gst_srt_server_sink_stop_sending (GstSRTServerSink * sink, SRTClient * client)
+{
+  int epoll_event = SRT_EPOLL_ERR;
+  int ret;
+
+  ret = srt_epoll_update_usock (GST_SRT_BASE_SINK (sink)->poll_id, client->sock,
+      &epoll_event);
+
+  sink->need_data = TRUE;
+  g_cond_broadcast (&sink->clients_cond);
+
+  return (ret != SRT_ERROR);
+}
+
+static void
+gst_srt_server_sink_epoll_loop (GstSRTServerSink * self)
+{
+  GstSRTBaseSink *sink = GST_SRT_BASE_SINK (self);
   SRTSOCKET ready[2];
+  int rnum = 2;
+  gpointer writefds;
   SYSSOCKET cancellable[2];
   struct sockaddr sa;
   int sa_len;
+  int wnum;
+  gint i;
 
-  if (srt_epoll_wait (sink->poll_id, ready, &(int) {
-          2}, 0, 0, -1, cancellable, &(int) {
+  if (g_cancellable_is_cancelled (sink->cancellable))
+    goto cancelled;
+
+  CLIENTS_LOCK (self);
+  wnum = g_hash_table_size (self->client_hash) + 1;
+  writefds = g_alloca (sizeof (SRTSOCKET) * wnum);
+  CLIENTS_UNLOCK (self);
+
+  if (srt_epoll_wait (sink->poll_id, ready, &rnum, (SRTSOCKET *) writefds,
+          &wnum, -1, cancellable, &(int) {
           2}, 0, 0) == SRT_ERROR) {
     int srt_errno;
 
@@ -176,49 +311,122 @@ idle_listen_callback (gpointer data)
     if (srt_errno != SRT_ETIMEOUT) {
       GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
           ("SRT error: %s", srt_getlasterror_str ()), (NULL));
-      return FALSE;
+      gst_task_stop (self->event_task);
+      return;
     }
   }
 
   if (g_cancellable_is_cancelled (sink->cancellable))
     goto cancelled;
 
-  client = srt_client_new ();
-  client->sock = srt_accept (sink->sock, &sa, &sa_len);
+  GST_TRACE_OBJECT (sink,
+      "num readable sockets: %d, num writable sockets: %d", rnum, wnum);
 
-  if (client->sock == SRT_INVALID_SOCK) {
-    GST_WARNING_OBJECT (self, "detected invalid SRT client socket (reason: %s)",
-        srt_getlasterror_str ());
-    srt_clearlasterror ();
-    srt_client_free (client);
-    return TRUE;
+  for (i = 0; i < rnum; i++) {
+    SRTClient *client;
+    SRT_SOCKSTATUS status;
+
+    /* Ignore non-server socket */
+    if (ready[i] != sink->sock) {
+      continue;
+    }
+
+    status = srt_getsockstate (ready[i]);
+    GST_TRACE_OBJECT (sink, "server socket status %d", status);
+
+    if (G_UNLIKELY (status != SRTS_LISTENING)) {
+      GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
+          ("Server socket is not listening"), (NULL));
+      gst_task_stop (self->event_task);
+      return;
+    }
+
+    client = srt_client_new ();
+    client->sock = srt_accept (sink->sock, &sa, &sa_len);
+
+    if (client->sock == SRT_INVALID_SOCK) {
+      GST_WARNING_OBJECT (self,
+          "detected invalid SRT client socket (reason: %s)",
+          srt_getlasterror_str ());
+      srt_clearlasterror ();
+      srt_client_unref (client);
+      continue;
+    }
+
+    client->sockaddr = g_socket_address_new_from_native (&sa, sa_len);
+
+    srt_setsockopt (client->sock, 0, SRTO_SNDSYN, &(int) {
+        0}, sizeof (int));
+
+    gst_srt_server_sink_add_client (self, client);
   }
 
-  client->sockaddr = g_socket_address_new_from_native (&sa, sa_len);
+  CLIENTS_LOCK (sink);
+  for (i = 0; i < wnum; i++) {
+    SRTSOCKET sock;
+    SRTClient *client;
+    gboolean remove_client = FALSE;
+    SRT_SOCKSTATUS status;
 
-  GST_OBJECT_LOCK (self);
-  self->clients = g_list_append (self->clients, client);
-  GST_OBJECT_UNLOCK (self);
+    if (g_cancellable_is_cancelled (sink->cancellable)) {
+      CLIENTS_UNLOCK (sink);
+      goto cancelled;
+    }
 
-  g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0, client->sock,
-      client->sockaddr);
-  GST_DEBUG_OBJECT (self, "client added");
+    sock = ((SRTSOCKET *) writefds)[i];
+    client = g_hash_table_lookup (self->client_hash, &sock);
 
-  return TRUE;
+    if (client == NULL) {
+      GST_WARNING_OBJECT (self, "Failed to lookup client");
+      continue;
+    }
+
+    status = srt_getsockstate (sock);
+
+    if (G_UNLIKELY (status != SRTS_CONNECTED)) {
+      GST_DEBUG_OBJECT (self, "Client disconected, status %d", status);
+      remove_client = TRUE;
+      goto next;
+    }
+
+    if (client->bufqueue->len > 0) {
+      GstMapInfo info;
+      GstBuffer *buf;
+
+      buf = g_ptr_array_index (client->bufqueue, 0);
+      if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
+        GST_ELEMENT_ERROR (self, RESOURCE, READ,
+            ("Could not map the input stream"), (NULL));
+        gst_task_stop (self->event_task);
+        return;
+      }
+
+      if (srt_sendmsg2 (sock, (char *) info.data, info.size, NULL) == SRT_ERROR) {
+        GST_WARNING_OBJECT (self, "Failed to send buffer to client");
+        remove_client = TRUE;
+      }
+
+      gst_buffer_unmap (buf, &info);
+      g_ptr_array_remove_index (client->bufqueue, 0);
+    }
+
+  next:
+    if (G_UNLIKELY (remove_client)) {
+      CLIENTS_UNLOCK (sink);
+      gst_srt_server_sink_remove_client (self, client, TRUE);
+      CLIENTS_LOCK (sink);
+    } else if (client->bufqueue->len == 0) {
+      gst_srt_server_sink_stop_sending (self, client);
+    }
+  }
+
+  CLIENTS_UNLOCK (sink);
+
+  return;
 
 cancelled:
   GST_DEBUG_OBJECT (self, "Cancelled");
-  return TRUE;
-}
-
-static gpointer
-thread_func (gpointer data)
-{
-  GstSRTServerSink *self = GST_SRT_SERVER_SINK (data);
-
-  g_main_loop_run (self->loop);
-
-  return NULL;
+  return;
 }
 
 static gboolean
@@ -229,7 +437,6 @@ gst_srt_server_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
   gint latency;
   gchar *passphrase = NULL;
   gint key_length;
-  GError *error = NULL;
 
   GST_OBJECT_LOCK (sink);
   latency = sink->latency;
@@ -247,104 +454,82 @@ gst_srt_server_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
     return FALSE;
   }
 
-  self->context = g_main_context_new ();
+  self->client_hash =
+      g_hash_table_new_full (g_int_hash, g_int_equal, NULL,
+      (GDestroyNotify) srt_client_unref);
 
-  self->server_source = g_idle_source_new ();
-  g_source_set_callback (self->server_source,
-      (GSourceFunc) idle_listen_callback, gst_object_ref (self),
-      (GDestroyNotify) gst_object_unref);
+  self->event_task =
+      gst_task_new ((GstTaskFunction) gst_srt_server_sink_epoll_loop, self,
+      NULL);
+  gst_task_set_lock (self->event_task, &self->event_lock);
 
-  g_source_attach (self->server_source, self->context);
-  self->loop = g_main_loop_new (self->context, TRUE);
-
-  self->thread = g_thread_try_new ("srtserversink", thread_func, self, &error);
-  if (error != NULL) {
-    GST_WARNING_OBJECT (self, "failed to create thread (reason: %s)",
-        error->message);
-    return FALSE;
-  }
+  gst_task_start (self->event_task);
 
   return TRUE;
 }
 
+/* Must be called with client lock taken */
 static GstFlowReturn
-send_mapped_buffer_internal (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo, SRTClient * client)
-{
-  if (srt_sendmsg2 (client->sock, (char *) mapinfo->data, mapinfo->size,
-          0) == SRT_ERROR) {
-    GST_WARNING_OBJECT (sink, "%s", srt_getlasterror_str ());
-    return GST_FLOW_ERROR;
-  }
-
-  return GST_FLOW_OK;
-}
-
-static GstFlowReturn
-send_buffer_internal (GstSRTBaseSink * sink,
+gst_srt_server_client_enqueue (GstSRTBaseSink * sink,
     GstBuffer * buf, gpointer user_data)
 {
-  GstMapInfo info;
   SRTClient *client = user_data;
-  GstFlowReturn ret;
 
-  if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
-    GST_ELEMENT_ERROR (sink, RESOURCE, READ,
-        ("Could not map the input stream"), (NULL));
-    return GST_FLOW_ERROR;
-  }
+  if (g_cancellable_is_cancelled (sink->cancellable))
+    return GST_FLOW_FLUSHING;
 
-  ret = send_mapped_buffer_internal (sink, &info, client);
+  gst_buffer_ref (buf);
+  g_ptr_array_add (client->bufqueue, buf);
+  gst_srt_server_sink_start_sending (GST_SRT_SERVER_SINK (sink), client);
 
-  gst_buffer_unmap (buf, &info);
-
-  return ret;
+  return GST_FLOW_OK;
 }
 
 static GstFlowReturn
 gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink, GstBuffer * buf)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GList *clients = self->clients;
   GstFlowReturn ret;
-  GstMapInfo info;
+  GHashTableIter iter;
+  gpointer value;
 
-  if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
-    GST_ELEMENT_ERROR (self, RESOURCE, READ,
-        ("Could not map the input stream"), (NULL));
-    return GST_FLOW_ERROR;
+  CLIENTS_LOCK (sink);
+  if (g_hash_table_size (self->client_hash) == 0) {
+    CLIENTS_UNLOCK (sink);
+    return GST_FLOW_OK;
   }
 
-  GST_OBJECT_LOCK (sink);
-  while (clients != NULL) {
-    SRTClient *client = clients->data;
-    clients = clients->next;
+  while (!self->need_data) {
+    g_cond_wait (&self->clients_cond, &self->clients_lock);
+    if (g_cancellable_is_cancelled (sink->cancellable)) {
+      CLIENTS_UNLOCK (sink);
+      return GST_FLOW_FLUSHING;
+    }
+  }
 
+  g_hash_table_iter_init (&iter, self->client_hash);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    SRTClient *client = (SRTClient *) value;
     if (!client->sent_headers) {
-      ret = gst_srt_base_sink_send_headers (sink, send_buffer_internal, client);
-      if (ret != GST_FLOW_OK)
-        goto err;
+      ret =
+          gst_srt_base_sink_send_headers (sink, gst_srt_server_client_enqueue,
+          client);
+      if (ret != GST_FLOW_OK) {
+        CLIENTS_UNLOCK (sink);
+        return ret;
+      }
 
       client->sent_headers = TRUE;
     }
 
-    ret = send_mapped_buffer_internal (sink, &info, client);
-    if (ret != GST_FLOW_OK)
-      goto err;
-
-    continue;
-
-  err:
-    self->clients = g_list_remove (self->clients, client);
-    GST_OBJECT_UNLOCK (sink);
-    g_signal_emit (self, signals[SIG_CLIENT_REMOVED], 0, client->sock,
-        client->sockaddr);
-    srt_client_free (client);
-    GST_OBJECT_LOCK (sink);
+    ret = gst_srt_server_client_enqueue (sink, buf, client);
+    if (ret != GST_FLOW_OK) {
+      CLIENTS_UNLOCK (sink);
+      return ret;
+    }
   }
-  GST_OBJECT_UNLOCK (sink);
 
-  gst_buffer_unmap (buf, &info);
+  CLIENTS_UNLOCK (sink);
 
   return GST_FLOW_OK;
 }
@@ -353,34 +538,24 @@ static gboolean
 gst_srt_server_sink_stop (GstBaseSink * sink)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GList *clients;
+  GHashTable *client_hash;
 
   GST_DEBUG_OBJECT (self, "closing client sockets");
 
-  GST_OBJECT_LOCK (sink);
-  clients = self->clients;
-  self->clients = NULL;
-  GST_OBJECT_UNLOCK (sink);
+  CLIENTS_LOCK (sink);
+  client_hash = self->client_hash;
+  self->client_hash = NULL;
+  CLIENTS_UNLOCK (sink);
 
-  g_list_foreach (clients, (GFunc) srt_emit_client_removed, self);
-  g_list_free_full (clients, (GDestroyNotify) srt_client_free);
+  g_hash_table_foreach_remove (client_hash, _client_hash_foreach_remove, self);
+  g_hash_table_destroy (client_hash);
 
   /* Set cancelled to terminate listen thread */
+  gst_task_stop (self->event_task);
   g_cancellable_cancel (GST_SRT_BASE_SINK (self)->cancellable);
-
-  if (self->loop) {
-    g_main_loop_quit (self->loop);
-    g_thread_join (self->thread);
-    g_clear_pointer (&self->loop, g_main_loop_unref);
-    g_clear_pointer (&self->thread, g_thread_unref);
-  }
-
-  if (self->server_source) {
-    g_source_destroy (self->server_source);
-    g_clear_pointer (&self->server_source, g_source_unref);
-  }
-
-  g_clear_pointer (&self->context, g_main_context_unref);
+  gst_task_join (self->event_task);
+  gst_object_unref (self->event_task);
+  self->event_task = NULL;
   g_cancellable_reset (GST_SRT_BASE_SINK (self)->cancellable);
 
   return GST_BASE_SINK_CLASS (parent_class)->stop (sink);
@@ -396,6 +571,7 @@ gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
 
   gobject_class->set_property = gst_srt_server_sink_set_property;
   gobject_class->get_property = gst_srt_server_sink_get_property;
+  gobject_class->finalize = gst_srt_server_sink_finalize;
 
   properties[PROP_STATS] = gst_param_spec_array ("stats", "Statistics",
       "Array of GstStructures containing SRT statistics",
@@ -451,4 +627,7 @@ gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
 static void
 gst_srt_server_sink_init (GstSRTServerSink * self)
 {
+  g_rec_mutex_init (&self->event_lock);
+  g_mutex_init (&self->clients_lock);
+  g_cond_init (&self->clients_cond);
 }

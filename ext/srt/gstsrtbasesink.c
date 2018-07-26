@@ -26,7 +26,10 @@
 #include "gstsrt.h"
 #include <srt/srt.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
+static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
 
 #define GST_CAT_DEFAULT gst_debug_srt_base_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
@@ -64,11 +67,15 @@ gst_srt_base_sink_get_property (GObject * object,
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
       if (self->uri != NULL) {
-        gchar *uri_str = gst_srt_base_sink_uri_get_uri (GST_URI_HANDLER (self));
+        gchar *uri_str;
+        GST_OBJECT_UNLOCK (self);
+        uri_str = gst_srt_base_sink_uri_get_uri (GST_URI_HANDLER (self));
         g_value_take_string (value, uri_str);
+        GST_OBJECT_LOCK (self);
       }
       break;
     case PROP_LATENCY:
@@ -84,6 +91,7 @@ gst_srt_base_sink_get_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -92,10 +100,13 @@ gst_srt_base_sink_set_property (GObject * object,
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
+      GST_OBJECT_UNLOCK (self);
       gst_srt_base_sink_uri_set_uri (GST_URI_HANDLER (self),
           g_value_get_string (value), NULL);
+      GST_OBJECT_LOCK (self);
       break;
     case PROP_LATENCY:
       self->latency = g_value_get_int (value);
@@ -116,6 +127,7 @@ gst_srt_base_sink_set_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -220,8 +232,7 @@ gst_srt_base_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
-  if (!bclass->send_buffer (self, &info))
-    ret = GST_FLOW_ERROR;
+  ret = bclass->send_buffer (self, &info);
 
   gst_buffer_unmap (buffer, &info);
 
@@ -232,6 +243,7 @@ static void
 gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSinkClass *gstbasesink_class = GST_BASE_SINK_CLASS (klass);
 
   gobject_class->set_property = gst_srt_base_sink_set_property;
@@ -263,6 +275,8 @@ gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
       32, SRT_DEFAULT_KEY_LENGTH, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
+
+  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
 
   gstbasesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_srt_base_sink_set_caps);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_base_sink_stop);
@@ -345,7 +359,7 @@ gst_srt_base_sink_uri_handler_init (gpointer g_iface, gpointer iface_data)
   iface->set_uri = gst_srt_base_sink_uri_set_uri;
 }
 
-gboolean
+GstFlowReturn
 gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
     GstSRTBaseSinkSendCallback send_cb, gpointer user_data)
 {
@@ -355,7 +369,7 @@ gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
   g_return_val_if_fail (send_cb, FALSE);
 
   if (!self->headers)
-    return TRUE;
+    return GST_FLOW_OK;
 
   size = gst_buffer_list_length (self->headers);
 
@@ -378,11 +392,11 @@ gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
 
     gst_buffer_unmap (buffer, &info);
 
-    if (!ret)
-      return FALSE;
+    if (ret != GST_FLOW_OK)
+      return ret;
   }
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 GstStructure *

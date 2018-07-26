@@ -46,11 +46,6 @@
 
 #define SRT_DEFAULT_POLL_TIMEOUT -1
 
-static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY);
-
 #define GST_CAT_DEFAULT gst_debug_srt_server_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -143,7 +138,7 @@ gst_srt_server_sink_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (object);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -177,7 +172,7 @@ gst_srt_server_sink_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (object);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
 
   switch (prop_id) {
     case PROP_POLL_TIMEOUT:
@@ -193,7 +188,7 @@ static gboolean
 idle_listen_callback (gpointer data)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (data);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
   gboolean ret = TRUE;
 
   SRTClient *client;
@@ -250,7 +245,7 @@ static gpointer
 thread_func (gpointer data)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (data);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
 
   g_main_loop_run (priv->loop);
 
@@ -261,7 +256,7 @@ static gboolean
 gst_srt_server_sink_start (GstBaseSink * sink)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
   GstSRTBaseSink *base = GST_SRT_BASE_SINK (sink);
   GstUri *uri = gst_uri_ref (GST_SRT_BASE_SINK (self)->uri);
   GError *error = NULL;
@@ -322,7 +317,7 @@ failed:
   return FALSE;
 }
 
-static gboolean
+static GstFlowReturn
 send_buffer_internal (GstSRTBaseSink * sink,
     const GstMapInfo * mapinfo, gpointer user_data)
 {
@@ -331,10 +326,10 @@ send_buffer_internal (GstSRTBaseSink * sink,
   if (srt_sendmsg2 (client->sock, (char *) mapinfo->data, mapinfo->size,
           0) == SRT_ERROR) {
     GST_WARNING_OBJECT (sink, "%s", srt_getlasterror_str ());
-    return FALSE;
+    return GST_FLOW_ERROR;
   }
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 static gboolean
@@ -342,8 +337,9 @@ gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink,
     const GstMapInfo * mapinfo)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
   GList *clients = priv->clients;
+  GstFlowReturn ret;
 
   GST_OBJECT_LOCK (sink);
   while (clients != NULL) {
@@ -351,13 +347,15 @@ gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink,
     clients = clients->next;
 
     if (!client->sent_headers) {
-      if (!gst_srt_base_sink_send_headers (sink, send_buffer_internal, client))
+      ret = gst_srt_base_sink_send_headers (sink, send_buffer_internal, client);
+      if (ret != GST_FLOW_OK)
         goto err;
 
       client->sent_headers = TRUE;
     }
 
-    if (!send_buffer_internal (sink, mapinfo, client))
+    ret = send_buffer_internal (sink, mapinfo, client);
+    if (ret != GST_FLOW_OK)
       goto err;
 
     continue;
@@ -372,14 +370,14 @@ gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink,
   }
   GST_OBJECT_UNLOCK (sink);
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 static gboolean
 gst_srt_server_sink_stop (GstBaseSink * sink)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
   GList *clients;
 
   GST_DEBUG_OBJECT (self, "closing client sockets");
@@ -417,7 +415,7 @@ static gboolean
 gst_srt_server_sink_unlock (GstBaseSink * sink)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
 
   priv->cancelled = TRUE;
 
@@ -428,7 +426,7 @@ static gboolean
 gst_srt_server_sink_unlock_stop (GstBaseSink * sink)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
-  GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
+  GstSRTServerSinkPrivate *priv = self->priv;
 
   priv->cancelled = FALSE;
 
@@ -491,7 +489,6 @@ gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
           client_removed), NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE,
       2, G_TYPE_INT, G_TYPE_SOCKET_ADDRESS);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
   gst_element_class_set_metadata (gstelement_class,
       "SRT server sink", "Sink/Network",
       "Send data over the network via SRT",
@@ -512,4 +509,6 @@ gst_srt_server_sink_init (GstSRTServerSink * self)
 {
   GstSRTServerSinkPrivate *priv = GST_SRT_SERVER_SINK_GET_PRIVATE (self);
   priv->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
+
+  self->priv = priv;
 }

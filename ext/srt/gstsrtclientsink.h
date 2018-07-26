@@ -42,6 +42,8 @@ struct _GstSRTClientSink {
   GstSRTBaseSink parent;
 
   /*< private >*/
+  GstSRTClientSinkPrivate *priv;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 

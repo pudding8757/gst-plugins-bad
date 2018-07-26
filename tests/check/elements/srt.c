@@ -378,7 +378,7 @@ GST_START_TEST (test_max_poll_timeout)
   GST_INFO ("Check clientsink and seversrc pair");
   fail_unless (srtsrc_setup (&src, &sinkpad, "srt://:9999", 2147483647, TRUE));
   /* Wait src setup done */
-  usleep (100);
+  sleep (1);
 
   fail_unless (srtsink_setup (&sink, &srcpad, "srt://127.0.0.1:9999",
           2147483647, FALSE));
@@ -390,7 +390,7 @@ GST_START_TEST (test_max_poll_timeout)
   gst_pad_push_event (srcpad, gst_event_new_segment (&segment));
   fail_unless_equals_int (gst_pad_push_list (srcpad, buf_list), GST_FLOW_OK);
 
-  usleep (100);
+  sleep (1);
 
   gst_check_teardown_pad_by_name (src, "src");
   gst_check_teardown_element (src);
@@ -405,7 +405,7 @@ GST_START_TEST (test_max_poll_timeout)
   fail_unless (srtsink_setup (&sink, &srcpad, "srt://:9999", 2147483647, TRUE));
 
   /* Wait sink setup done */
-  usleep (100);
+  sleep (1);
 
   fail_unless (srtsrc_setup (&src, &sinkpad, "srt://127.0.0.1:9999", 2147483647,
           FALSE));
@@ -417,13 +417,69 @@ GST_START_TEST (test_max_poll_timeout)
   gst_pad_push_event (srcpad, gst_event_new_segment (&segment));
   fail_unless_equals_int (gst_pad_push_list (srcpad, buf_list), GST_FLOW_OK);
 
-  usleep (100);
+  sleep (1);
 
   gst_check_teardown_pad_by_name (src, "src");
   gst_check_teardown_element (src);
 
   gst_check_teardown_pad_by_name (sink, "sink");
   gst_check_teardown_element (sink);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_refuse_multi_clients)
+{
+  GstElement *src = NULL;
+  GstElement *sink = NULL;
+  GstElement *other_sink = NULL;
+  GstPad *sinkpad = NULL;
+  GstPad *srcpad = NULL;
+  GstPad *other_srcpad = NULL;
+  GstBufferList *buf_list;
+  GstSegment segment;
+
+  /* Set maximaum poll timeout and check elements are cancallable */
+
+  GST_INFO ("Check clientsink and seversrc pair");
+  fail_unless (srtsrc_setup (&src, &sinkpad, "srt://:9999", 2147483647, TRUE));
+  /* Wait src setup done */
+  sleep (1);
+
+  fail_unless (srtsink_setup (&sink, &srcpad, "srt://127.0.0.1:9999",
+          2147483647, FALSE));
+
+  sleep (1);
+  buf_list = create_srt_chunk ();
+
+  gst_pad_push_event (srcpad, gst_event_new_stream_start ("start-test!"));
+  gst_segment_init (&segment, GST_FORMAT_TIME);
+  gst_pad_push_event (srcpad, gst_event_new_segment (&segment));
+  fail_unless_equals_int (gst_pad_push_list (srcpad, buf_list), GST_FLOW_OK);
+
+  /* serversrc already have a client now, this connection request must be refused */
+  fail_unless (srtsink_setup (&other_sink, &other_srcpad,
+          "srt://127.0.0.1:9999", 2147483647, FALSE));
+  sleep (1);
+
+  buf_list = create_srt_chunk ();
+
+  gst_pad_push_event (other_srcpad, gst_event_new_stream_start ("start-test!"));
+  gst_segment_init (&segment, GST_FORMAT_TIME);
+  gst_pad_push_event (other_srcpad, gst_event_new_segment (&segment));
+  fail_unless_equals_int (gst_pad_push_list (other_srcpad, buf_list),
+      GST_FLOW_OK);
+
+  sleep (1);
+
+  gst_check_teardown_pad_by_name (src, "src");
+  gst_check_teardown_element (src);
+
+  gst_check_teardown_pad_by_name (sink, "sink");
+  gst_check_teardown_element (sink);
+
+  gst_check_teardown_pad_by_name (other_sink, "sink");
+  gst_check_teardown_element (other_sink);
 }
 
 GST_END_TEST;
@@ -436,6 +492,7 @@ srt_suite (void)
 
   tcase_add_test (tc_chain, test_properties);
   tcase_add_test (tc_chain, test_max_poll_timeout);
+  tcase_add_test (tc_chain, test_refuse_multi_clients);
 
   suite_add_tcase (s, tc_chain);
 

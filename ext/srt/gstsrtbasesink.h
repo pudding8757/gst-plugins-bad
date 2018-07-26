@@ -44,21 +44,30 @@ typedef struct _GstSRTBaseSinkClass GstSRTBaseSinkClass;
 struct _GstSRTBaseSink {
   GstBaseSink parent;
 
+  /*< protected >*/
   GstUri *uri;
-  GstBufferList *headers;
   gint latency;
   gchar *passphrase;
   gint key_length;
 
+  SRTSOCKET sock;
+  gint poll_id;
+
+  GCancellable *cancellable;
+  SYSSOCKET event_fd;
+
   /*< private >*/
+  GstBufferList *headers;
+
   gpointer _gst_reserved[GST_PADDING];
 };
 
 struct _GstSRTBaseSinkClass {
   GstBaseSinkClass parent_class;
 
+  gboolean      (*open) (GstSRTBaseSink *self, const gchar * host, guint port, gint *poll_id, SRTSOCKET *socket);
   /* ask the subclass to send a buffer */
-  gboolean (*send_buffer)       (GstSRTBaseSink *self, const GstMapInfo *mapinfo);
+  GstFlowReturn (*send_buffer)       (GstSRTBaseSink *self, GstBuffer * buf);
 
   gpointer _gst_reserved[GST_PADDING_LARGE];
 };
@@ -66,10 +75,10 @@ struct _GstSRTBaseSinkClass {
 GST_EXPORT
 GType gst_srt_base_sink_get_type (void);
 
-typedef gboolean (*GstSRTBaseSinkSendCallback) (GstSRTBaseSink *sink,
-    const GstMapInfo *mapinfo, gpointer user_data);
+typedef GstFlowReturn (*GstSRTBaseSinkSendCallback) (GstSRTBaseSink *sink,
+    GstBuffer *buf, gpointer user_data);
 
-gboolean gst_srt_base_sink_send_headers (GstSRTBaseSink *sink,
+GstFlowReturn gst_srt_base_sink_send_headers (GstSRTBaseSink *sink,
     GstSRTBaseSinkSendCallback send_cb, gpointer user_data);
 
 GstStructure * gst_srt_base_sink_get_stats (GSocketAddress *sockaddr,

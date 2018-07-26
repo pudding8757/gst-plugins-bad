@@ -41,8 +41,12 @@ typedef struct _GstSRTServerSinkPrivate GstSRTServerSinkPrivate;
 struct _GstSRTServerSink {
   GstSRTBaseSink parent;
 
-  /*< private >*/
-  gpointer _gst_reserved[GST_PADDING];
+  GMainLoop *loop;
+  GMainContext *context;
+  GSource *server_source;
+  GThread *thread;
+
+  GList *clients;
 };
 
 struct _GstSRTServerSinkClass {
@@ -50,8 +54,6 @@ struct _GstSRTServerSinkClass {
 
   void (*client_added)      (GstSRTServerSink *self, int sock, GSocketAddress *addr);
   void (*client_removed)    (GstSRTServerSink *self, int sock, GSocketAddress *addr);
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

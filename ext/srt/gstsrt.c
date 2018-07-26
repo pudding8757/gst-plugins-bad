@@ -265,10 +265,83 @@ failed:
   return SRT_INVALID_SOCK;
 }
 
+#ifndef GST_DISABLE_GST_DEBUG
+static void
+gst_srt_log_callback (void *opaque, int level, const char *file, int line,
+    const char *area, const char *message)
+{
+  GstDebugLevel gst_level;
+
+  switch (level) {
+    case LOG_CRIT:
+      gst_level = GST_LEVEL_ERROR;
+      break;
+    case LOG_ERR:
+      /* this was unexpected for the library */
+      gst_level = GST_LEVEL_WARNING;
+      break;
+    case LOG_WARNING:
+      /* this was expected by the library, but may be harmful for the application */
+      gst_level = GST_LEVEL_INFO;
+      break;
+    case LOG_NOTICE:
+      /* a significant, but rarely occurring event */
+      gst_level = GST_LEVEL_DEBUG;
+      break;
+    case LOG_DEBUG:
+      /* may occur even very often and enabling it can harm performance */
+      gst_level = GST_LEVEL_LOG;
+      break;
+    default:
+      gst_level = GST_LEVEL_TRACE;
+      break;
+  }
+
+  gst_debug_log (gst_debug_srt,
+      gst_level, file, area, line, NULL, "%s", message);
+}
+
+static void
+_set_srt_debug_level (void)
+{
+  GstDebugLevel gst_level;
+
+  gst_level = gst_debug_category_get_threshold (gst_debug_srt);
+
+  if (gst_level == GST_LEVEL_NONE)
+    return;
+
+  srt_setloghandler (NULL, gst_srt_log_callback);
+
+  switch (gst_level) {
+    case GST_LEVEL_ERROR:
+      srt_setloglevel (LOG_CRIT);
+      break;
+    case GST_LEVEL_WARNING:
+      srt_setloglevel (LOG_ERR);
+      break;
+    case GST_LEVEL_FIXME:
+    case GST_LEVEL_INFO:
+      srt_setloglevel (LOG_WARNING);
+      break;
+    case GST_LEVEL_DEBUG:
+      srt_setloglevel (LOG_NOTICE);
+      break;
+    default:
+      srt_setloglevel (LOG_DEBUG);
+      break;
+  }
+}
+#endif
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
   GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srt", 0, "SRT Common code");
+
+#ifndef GST_DISABLE_GST_DEBUG
+  _set_srt_debug_level ();
+#endif
 
   if (!gst_element_register (plugin, "srtclientsrc", GST_RANK_PRIMARY,
           GST_TYPE_SRT_CLIENT_SRC))

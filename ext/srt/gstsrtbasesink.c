@@ -256,6 +256,10 @@ gst_srt_base_sink_init (GstSRTBaseSink * self)
   self->latency = SRT_DEFAULT_LATENCY;
   self->passphrase = NULL;
   self->key_length = SRT_DEFAULT_KEY_LENGTH;
+
+#ifndef GST_DISABLE_GST_DEBUG
+  gst_srt_debug_init ();
+#endif
 }
 
 static GstURIType

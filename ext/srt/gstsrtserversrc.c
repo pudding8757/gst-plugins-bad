@@ -154,11 +154,15 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   GstSRTServerSrcPrivate *priv = self->priv;
   GstMapInfo info;
   SRTSOCKET ready[2];
+  gint rnum = 2;
+  SRTSOCKET client_sock = SRT_INVALID_SOCK;
   SYSSOCKET cancellable[2];
   gint recv_len;
   struct sockaddr client_sa = { 0, };
   size_t client_sa_len = sizeof (struct sockaddr_in);
   SRT_MSGCTRL mc = srt_msgctrl_default;
+  gint i;
+  gboolean have_data = FALSE;
 
   /* In here, wait event of SRTSOCKET and/or SYSSOCKE (fd of GCancellable)
    * Note that, to interrupt srt_epoll_wait() without releasing the epoll,
@@ -178,8 +182,8 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
    */
 
 retry:
-  if (srt_epoll_wait (priv->poll_id, ready, &(int) {
-          2}, 0, 0, priv->poll_timeout, cancellable, &(int) {
+  if (srt_epoll_wait (priv->poll_id, ready, &rnum, 0, 0, priv->poll_timeout,
+          cancellable, &(int) {
           2}, 0, 0) == SRT_ERROR) {
     int srt_errno;
 
@@ -201,35 +205,51 @@ retry:
   if (g_cancellable_is_cancelled (priv->cancellable))
     goto cancelled;
 
-  if (G_UNLIKELY (!priv->has_client)) {
-    priv->client_sock =
-        srt_accept (priv->sock, &client_sa, (int *) &client_sa_len);
+  for (i = 0; i < rnum; i++) {
+    if (ready[i] == priv->sock) {
+      /* Accept client socket anyway */
+      client_sock = srt_accept (priv->sock, &client_sa, (int *) &client_sa_len);
 
-    GST_DEBUG_OBJECT (self, "checking client sock");
-    if (priv->client_sock == SRT_INVALID_SOCK) {
-      GST_WARNING_OBJECT (self,
-          "detected invalid SRT client socket (reason: %s)",
-          srt_getlasterror_str ());
-      srt_clearlasterror ();
-    } else {
-      priv->has_client = TRUE;
-      g_clear_object (&priv->client_sockaddr);
-      priv->client_sockaddr = g_socket_address_new_from_native (&client_sa,
-          client_sa_len);
-      g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0,
-          priv->client_sock, priv->client_sockaddr);
+      if (G_UNLIKELY (client_sock == SRT_INVALID_SOCK)) {
+        GST_WARNING_OBJECT (self,
+            "detected invalid SRT client socket (reason: %s)",
+            srt_getlasterror_str ());
+        srt_clearlasterror ();
 
-      /* Make SRT client socket non-blocking */
-      srt_setsockopt (priv->client_sock, 0, SRTO_RCVSYN, &(int) {
-          0}, sizeof (int));
+        continue;
+      }
 
-      srt_epoll_add_usock (priv->poll_id, priv->client_sock, &(int) {
-          SRT_EPOLL_IN | SRT_EPOLL_ERR});
-      srt_epoll_remove_usock (priv->poll_id, priv->sock);
+      if (!priv->has_client) {
+        GST_DEBUG_OBJECT (src, "Client added");
+
+        priv->client_sock = client_sock;
+        client_sock = SRT_INVALID_SOCK;
+        priv->has_client = TRUE;
+        g_clear_object (&priv->client_sockaddr);
+        priv->client_sockaddr = g_socket_address_new_from_native (&client_sa,
+            client_sa_len);
+        g_signal_emit (self, signals[SIG_CLIENT_ADDED], 0,
+            priv->client_sock, priv->client_sockaddr);
+
+        /* Make SRT client socket non-blocking */
+
+        srt_setsockopt (priv->client_sock, 0, SRTO_RCVSYN, &(int) {
+            0}, sizeof (int));
+
+        srt_epoll_add_usock (priv->poll_id, priv->client_sock, &(int) {
+            SRT_EPOLL_IN | SRT_EPOLL_ERR});
+      } else {
+        /* Close the socket for the client to know refused connedtion */
+        GST_DEBUG_OBJECT (src, "Forced closing client");
+        srt_close (client_sock);
+      }
+    } else if (priv->has_client && ready[i] == priv->client_sock) {
+      have_data = TRUE;
     }
-
-    goto retry;
   }
+
+  if (G_UNLIKELY (!have_data))
+    goto retry;
 
   GST_DEBUG_OBJECT (self, "filling buffer");
 
@@ -251,8 +271,6 @@ retry:
         priv->client_sock, priv->client_sockaddr);
 
     srt_epoll_remove_usock (priv->poll_id, priv->client_sock);
-    srt_epoll_add_usock (priv->poll_id, priv->sock, &(int) {
-        SRT_EPOLL_IN | SRT_EPOLL_ERR});
 
     srt_close (priv->client_sock);
     priv->client_sock = SRT_INVALID_SOCK;

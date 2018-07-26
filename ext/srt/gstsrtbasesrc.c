@@ -386,6 +386,10 @@ gst_srt_base_src_init (GstSRTBaseSrc * self)
   gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
   gst_base_src_set_do_timestamp (GST_BASE_SRC (self), TRUE);
 
+#ifndef GST_DISABLE_GST_DEBUG
+  gst_srt_debug_init ();
+#endif
+
   self->latency = SRT_DEFAULT_LATENCY;
   self->key_length = SRT_DEFAULT_KEY_LENGTH;
   self->cancellable = g_cancellable_new ();

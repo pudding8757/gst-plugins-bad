@@ -314,6 +314,84 @@ failed:
   return SRT_INVALID_SOCK;
 }
 
+static void
+gst_srt_log_callback (void *opaque, int level, const char *file, int line,
+    const char *area, const char *message)
+{
+  GstDebugLevel gst_level;
+
+  switch (level) {
+    case LOG_CRIT:
+      gst_level = GST_LEVEL_ERROR;
+      break;
+    case LOG_ERR:
+      /* this was unexpected for the library */
+      gst_level = GST_LEVEL_WARNING;
+      break;
+    case LOG_WARNING:
+      /* this was expected by the library, but may be harmful for the application */
+      gst_level = GST_LEVEL_INFO;
+      break;
+    case LOG_NOTICE:
+      /* a significant, but rarely occurring event */
+      gst_level = GST_LEVEL_DEBUG;
+      break;
+    case LOG_DEBUG:
+      /* may occur even very often and enabling it can harm performance */
+      gst_level = GST_LEVEL_LOG;
+      break;
+    default:
+      gst_level = GST_LEVEL_TRACE;
+      break;
+  }
+
+  gst_debug_log (gst_debug_srt,
+      gst_level, file, area, line, NULL, "%s", message);
+}
+
+void
+gst_srt_debug_init (void)
+{
+  static gsize gonce = 0;
+
+  if (g_once_init_enter (&gonce)) {
+    GstDebugLevel gst_level;
+
+    gst_level = gst_debug_category_get_threshold (gst_debug_srt);
+
+    if (gst_level != GST_LEVEL_NONE) {
+      srt_setloghandler (NULL, gst_srt_log_callback);
+
+      switch (gst_level) {
+        case GST_LEVEL_ERROR:
+          srt_setloglevel (LOG_CRIT);
+          break;
+        case GST_LEVEL_WARNING:
+          srt_setloglevel (LOG_ERR);
+          break;
+        case GST_LEVEL_FIXME:
+        case GST_LEVEL_INFO:
+          srt_setloglevel (LOG_WARNING);
+          break;
+        case GST_LEVEL_DEBUG:
+          srt_setloglevel (LOG_NOTICE);
+          break;
+        case GST_LEVEL_LOG:
+          srt_setloglevel (LOG_DEBUG);
+          break;
+        default:
+          if (gst_level > GST_LEVEL_LOG)
+            srt_setloglevel (LOG_DEBUG);
+          else
+            srt_setloglevel (LOG_CRIT);
+          break;
+      }
+    }
+
+    g_once_init_leave (&gonce, 1);
+  }
+}
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {

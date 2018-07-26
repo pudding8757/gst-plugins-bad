@@ -377,6 +377,10 @@ gst_srt_base_sink_init (GstSRTBaseSink * self)
 
   self->cancellable = g_cancellable_new ();
   self->event_fd = g_cancellable_get_fd (self->cancellable);
+
+#ifndef GST_DISABLE_GST_DEBUG
+  gst_srt_debug_init ();
+#endif
 }
 
 static GstURIType

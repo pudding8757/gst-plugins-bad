@@ -24,9 +24,11 @@
 
 #include "gstsrtbasesink.h"
 #include "gstsrt.h"
-#include <srt/srt.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
+static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
 
 #define GST_CAT_DEFAULT gst_debug_srt_base_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
@@ -64,11 +66,15 @@ gst_srt_base_sink_get_property (GObject * object,
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
       if (self->uri != NULL) {
-        gchar *uri_str = gst_srt_base_sink_uri_get_uri (GST_URI_HANDLER (self));
+        gchar *uri_str;
+        GST_OBJECT_UNLOCK (self);
+        uri_str = gst_srt_base_sink_uri_get_uri (GST_URI_HANDLER (self));
         g_value_take_string (value, uri_str);
+        GST_OBJECT_LOCK (self);
       }
       break;
     case PROP_LATENCY:
@@ -84,6 +90,7 @@ gst_srt_base_sink_get_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -92,10 +99,13 @@ gst_srt_base_sink_set_property (GObject * object,
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_URI:
+      GST_OBJECT_UNLOCK (self);
       gst_srt_base_sink_uri_set_uri (GST_URI_HANDLER (self),
           g_value_get_string (value), NULL);
+      GST_OBJECT_LOCK (self);
       break;
     case PROP_LATENCY:
       self->latency = g_value_get_int (value);
@@ -116,6 +126,7 @@ gst_srt_base_sink_set_property (GObject * object,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 static void
@@ -126,6 +137,9 @@ gst_srt_base_sink_finalize (GObject * object)
   g_clear_pointer (&self->headers, gst_buffer_list_unref);
   g_clear_pointer (&self->uri, gst_uri_unref);
   g_clear_pointer (&self->passphrase, g_free);
+
+  g_cancellable_release_fd (self->cancellable);
+  g_object_unref (self->cancellable);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -181,9 +195,74 @@ gst_srt_base_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
 }
 
 static gboolean
+gst_srt_base_sink_start (GstBaseSink * sink)
+{
+  GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+  GstSRTBaseSinkClass *bclass;
+  gchar *host = NULL;
+  guint port;
+
+  GST_OBJECT_LOCK (self);
+  if (G_UNLIKELY (self->uri == NULL ||
+          gst_uri_get_port (self->uri) == GST_URI_NO_PORT)) {
+    GST_OBJECT_UNLOCK (self);
+    GST_ELEMENT_ERROR (sink, RESOURCE, OPEN_WRITE, NULL, (("Invalid port")));
+    return FALSE;
+  }
+
+  host = g_strdup (gst_uri_get_host (self->uri));
+  port = gst_uri_get_port (self->uri);
+  GST_OBJECT_UNLOCK (self);
+
+  bclass = GST_SRT_BASE_SINK_GET_CLASS (self);
+  if (!bclass->open (self, host, port, &self->poll_id, &self->sock)) {
+    GST_ERROR_OBJECT (self, "Failed to create srt socket");
+    goto failed;
+  }
+
+  /* HACK: Since srt_epoll_wait() is not cancellable, install our event fd to
+   * epoll */
+  srt_epoll_add_ssock (self->poll_id, self->event_fd, NULL);
+
+  g_free (host);
+
+  return TRUE;
+
+failed:
+  if (self->poll_id != SRT_ERROR) {
+    srt_epoll_release (self->poll_id);
+    self->poll_id = SRT_ERROR;
+  }
+
+  if (self->sock != SRT_ERROR) {
+    srt_close (self->sock);
+    self->sock = SRT_ERROR;
+  }
+
+  g_free (host);
+
+  return FALSE;
+}
+
+static gboolean
 gst_srt_base_sink_stop (GstBaseSink * sink)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+
+  GST_DEBUG_OBJECT (self, "release SRT epoll");
+  if (self->poll_id != SRT_ERROR) {
+    if (self->sock != SRT_INVALID_SOCK)
+      srt_epoll_remove_usock (self->poll_id, self->sock);
+    srt_epoll_remove_ssock (self->poll_id, self->event_fd);
+    srt_epoll_release (self->poll_id);
+    self->poll_id = SRT_ERROR;
+  }
+
+  GST_DEBUG_OBJECT (self, "close SRT socket");
+  if (self->sock != SRT_INVALID_SOCK) {
+    srt_close (self->sock);
+    self->sock = SRT_INVALID_SOCK;
+  }
 
   g_clear_pointer (&self->headers, gst_buffer_list_unref);
 
@@ -194,15 +273,16 @@ static GstFlowReturn
 gst_srt_base_sink_render (GstBaseSink * sink, GstBuffer * buffer)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
-  GstMapInfo info;
   GstSRTBaseSinkClass *bclass = GST_SRT_BASE_SINK_GET_CLASS (sink);
-  GstFlowReturn ret = GST_FLOW_OK;
 
   if (self->headers && GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_HEADER)) {
     GST_DEBUG_OBJECT (self, "Have streamheaders,"
         " ignoring header %" GST_PTR_FORMAT, buffer);
     return GST_FLOW_OK;
   }
+
+  if (g_cancellable_is_cancelled (self->cancellable))
+    return GST_FLOW_FLUSHING;
 
   GST_TRACE_OBJECT (self, "sending buffer %p, offset %"
       G_GINT64_FORMAT ", offset_end %" G_GINT64_FORMAT
@@ -214,24 +294,36 @@ gst_srt_base_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       GST_TIME_ARGS (GST_BUFFER_DURATION (buffer)),
       gst_buffer_get_size (buffer));
 
-  if (!gst_buffer_map (buffer, &info, GST_MAP_READ)) {
-    GST_ELEMENT_ERROR (self, RESOURCE, READ,
-        ("Could not map the input stream"), (NULL));
-    return GST_FLOW_ERROR;
-  }
+  return bclass->send_buffer (self, buffer);
+}
 
-  if (!bclass->send_buffer (self, &info))
-    ret = GST_FLOW_ERROR;
+static gboolean
+gst_srt_base_sink_unlock (GstBaseSink * sink)
+{
+  GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
 
-  gst_buffer_unmap (buffer, &info);
+  GST_DEBUG_OBJECT (self, "Unlock");
+  g_cancellable_cancel (self->cancellable);
 
-  return ret;
+  return TRUE;
+}
+
+static gboolean
+gst_srt_base_sink_unlock_stop (GstBaseSink * sink)
+{
+  GstSRTBaseSink *self = GST_SRT_BASE_SINK (sink);
+
+  GST_DEBUG_OBJECT (self, "Unlock stop");
+  g_cancellable_reset (self->cancellable);
+
+  return TRUE;
 }
 
 static void
 gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
   GstBaseSinkClass *gstbasesink_class = GST_BASE_SINK_CLASS (klass);
 
   gobject_class->set_property = gst_srt_base_sink_set_property;
@@ -264,9 +356,15 @@ gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
+  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
+
   gstbasesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_srt_base_sink_set_caps);
+  gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_srt_base_sink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_base_sink_stop);
   gstbasesink_class->render = GST_DEBUG_FUNCPTR (gst_srt_base_sink_render);
+  gstbasesink_class->unlock = GST_DEBUG_FUNCPTR (gst_srt_base_sink_unlock);
+  gstbasesink_class->unlock_stop =
+      GST_DEBUG_FUNCPTR (gst_srt_base_sink_unlock_stop);
 }
 
 static void
@@ -276,6 +374,9 @@ gst_srt_base_sink_init (GstSRTBaseSink * self)
   self->latency = SRT_DEFAULT_LATENCY;
   self->passphrase = NULL;
   self->key_length = SRT_DEFAULT_KEY_LENGTH;
+
+  self->cancellable = g_cancellable_new ();
+  self->event_fd = g_cancellable_get_fd (self->cancellable);
 }
 
 static GstURIType
@@ -310,7 +411,6 @@ gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
     const gchar * uri, GError ** error)
 {
   GstSRTBaseSink *self = GST_SRT_BASE_SINK (handler);
-  gboolean ret = TRUE;
   GstUri *parsed_uri = gst_uri_from_string (uri);
 
   GST_TRACE_OBJECT (self, "Requested URI=%s", uri);
@@ -318,8 +418,7 @@ gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
   if (g_strcmp0 (gst_uri_get_scheme (parsed_uri), SRT_URI_SCHEME) != 0) {
     g_set_error (error, GST_URI_ERROR, GST_URI_ERROR_BAD_URI,
         "Invalid SRT URI scheme");
-    ret = FALSE;
-    goto out;
+    return FALSE;
   }
 
   GST_OBJECT_LOCK (self);
@@ -329,9 +428,8 @@ gst_srt_base_sink_uri_set_uri (GstURIHandler * handler,
 
   GST_OBJECT_UNLOCK (self);
 
-out:
   g_clear_pointer (&parsed_uri, gst_uri_unref);
-  return ret;
+  return TRUE;
 }
 
 static void
@@ -345,7 +443,7 @@ gst_srt_base_sink_uri_handler_init (gpointer g_iface, gpointer iface_data)
   iface->set_uri = gst_srt_base_sink_uri_set_uri;
 }
 
-gboolean
+GstFlowReturn
 gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
     GstSRTBaseSinkSendCallback send_cb, gpointer user_data)
 {
@@ -355,7 +453,7 @@ gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
   g_return_val_if_fail (send_cb, FALSE);
 
   if (!self->headers)
-    return TRUE;
+    return GST_FLOW_OK;
 
   size = gst_buffer_list_length (self->headers);
 
@@ -363,26 +461,17 @@ gst_srt_base_sink_send_headers (GstSRTBaseSink * self,
 
   for (i = 0; i < size; i++) {
     GstBuffer *buffer = gst_buffer_list_get (self->headers, i);
-    GstMapInfo info;
     gboolean ret;
 
     GST_TRACE_OBJECT (self, "sending header %u %" GST_PTR_FORMAT, i, buffer);
 
-    if (!gst_buffer_map (buffer, &info, GST_MAP_READ)) {
-      GST_ELEMENT_ERROR (self, RESOURCE, READ,
-          ("Could not map the input stream"), (NULL));
-      return FALSE;
-    }
+    ret = send_cb (self, buffer, user_data);
 
-    ret = send_cb (self, &info, user_data);
-
-    gst_buffer_unmap (buffer, &info);
-
-    if (!ret)
-      return FALSE;
+    if (ret != GST_FLOW_OK)
+      return ret;
   }
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 GstStructure *

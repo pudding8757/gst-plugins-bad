@@ -40,12 +40,6 @@ typedef struct _GstSRTServerSinkClass GstSRTServerSinkClass;
 struct _GstSRTServerSink {
   GstSRTBaseSink parent;
 
-  gboolean cancelled;
-
-  SRTSOCKET sock;
-  gint poll_id;
-  gint poll_timeout;
-
   GMainLoop *loop;
   GMainContext *context;
   GSource *server_source;
@@ -59,8 +53,6 @@ struct _GstSRTServerSinkClass {
 
   void (*client_added)      (GstSRTServerSink *self, int sock, GSocketAddress *addr);
   void (*client_removed)    (GstSRTServerSink *self, int sock, GSocketAddress *addr);
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

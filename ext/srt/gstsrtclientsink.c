@@ -48,20 +48,12 @@
 #include <srt/srt.h>
 #include <gio/gio.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
-
-static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS_ANY);
-
 #define GST_CAT_DEFAULT gst_debug_srt_client_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
 enum
 {
-  PROP_POLL_TIMEOUT = 1,
-  PROP_BIND_ADDRESS,
+  PROP_BIND_ADDRESS = 1,
   PROP_BIND_PORT,
   PROP_RENDEZ_VOUS,
   PROP_STATS,
@@ -70,6 +62,10 @@ enum
 };
 
 static GParamSpec *properties[PROP_LAST];
+
+#define DEFAULT_BIND_ADDRESS  NULL
+#define DEFAULT_BIND_PORT     0
+#define DEFAULT_RENDEZ_VOUS   FALSE
 
 #define gst_srt_client_sink_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstSRTClientSink, gst_srt_client_sink,
@@ -84,9 +80,6 @@ gst_srt_client_sink_get_property (GObject * object,
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      g_value_set_int (value, self->poll_timeout);
-      break;
     case PROP_BIND_PORT:
       g_value_set_int (value, self->bind_port);
       break;
@@ -98,7 +91,7 @@ gst_srt_client_sink_get_property (GObject * object,
       break;
     case PROP_STATS:
       g_value_take_boxed (value, gst_srt_base_sink_get_stats (self->sockaddr,
-              self->sock));
+              GST_SRT_BASE_SINK (self)->sock));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -113,9 +106,6 @@ gst_srt_client_sink_set_property (GObject * object,
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      self->poll_timeout = g_value_get_int (value);
-      break;
     case PROP_BIND_ADDRESS:
       g_free (self->bind_address);
       self->bind_address = g_value_dup_string (value);
@@ -143,72 +133,97 @@ gst_srt_client_sink_finalize (GObject * object)
 }
 
 static gboolean
-gst_srt_client_sink_start (GstBaseSink * sink)
+gst_srt_client_sink_open (GstSRTBaseSink * sink, const gchar * host, guint port,
+    gint * poll_id, SRTSOCKET * socket)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
-  GstSRTBaseSink *base = GST_SRT_BASE_SINK (sink);
-  GstUri *uri = gst_uri_ref (GST_SRT_BASE_SINK (self)->uri);
+  gint latency;
+  gchar *passphrase = NULL;
+  gint key_length;
 
-  self->sock = gst_srt_client_connect (GST_ELEMENT (sink), TRUE,
-      gst_uri_get_host (uri), gst_uri_get_port (uri), self->rendez_vous,
-      self->bind_address, self->bind_port, base->latency,
-      &self->sockaddr, &self->poll_id, base->passphrase, base->key_length);
+  GST_OBJECT_LOCK (sink);
+  latency = sink->latency;
+  passphrase = g_strdup (sink->passphrase);
+  key_length = sink->key_length;
+  GST_OBJECT_UNLOCK (sink);
 
-  g_clear_pointer (&uri, gst_uri_unref);
+  *socket = gst_srt_client_connect (GST_ELEMENT (sink), TRUE, host, port,
+      self->rendez_vous, self->bind_address, self->bind_port, latency,
+      &self->sockaddr, poll_id, passphrase, key_length);
 
-  return (self->sock != SRT_INVALID_SOCK);
+  g_free (passphrase);
+
+  return (*socket != SRT_INVALID_SOCK);
 }
 
-static gboolean
+static GstFlowReturn
 send_buffer_internal (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo, gpointer user_data)
+    GstBuffer * buf, gpointer user_data)
 {
   SRTSOCKET sock = GPOINTER_TO_INT (user_data);
+  SRTSOCKET ready[2];
+  SYSSOCKET cancellable[2];
+  GstMapInfo info;
 
-  if (srt_sendmsg2 (sock, (char *) mapinfo->data, mapinfo->size,
-          0) == SRT_ERROR) {
-    GST_ELEMENT_ERROR (sink, RESOURCE, WRITE, NULL,
-        ("%s", srt_getlasterror_str ()));
-    return FALSE;
+  if (srt_epoll_wait (sink->poll_id, 0, 0, ready, &(int) {
+          2}, -1, cancellable, &(int) {
+          2}, 0, 0) == SRT_ERROR) {
+    if (g_cancellable_is_cancelled (sink->cancellable))
+      goto cancelled;
+
+    GST_ELEMENT_ERROR (sink, RESOURCE, FAILED,
+        ("SRT error: %s", srt_getlasterror_str ()), (NULL));
+    return GST_FLOW_ERROR;
   }
 
-  return TRUE;
+  if (g_cancellable_is_cancelled (sink->cancellable))
+    goto cancelled;
+
+  if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
+    GST_ELEMENT_ERROR (sink, RESOURCE, READ,
+        ("Could not map the input stream"), (NULL));
+    return GST_FLOW_ERROR;
+  }
+
+  if (srt_sendmsg2 (sock, (char *) info.data, info.size, NULL) == SRT_ERROR) {
+    GST_ELEMENT_ERROR (sink, RESOURCE, WRITE, NULL,
+        ("%s", srt_getlasterror_str ()));
+    gst_buffer_unmap (buf, &info);
+    return GST_FLOW_ERROR;
+  }
+
+  gst_buffer_unmap (buf, &info);
+
+  return GST_FLOW_OK;
+
+cancelled:
+  GST_DEBUG_OBJECT (sink, "Cancelled");
+  return GST_FLOW_FLUSHING;
 }
 
-static gboolean
-gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo)
+static GstFlowReturn
+gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink, GstBuffer * buf)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
 
-  if (!self->sent_headers) {
-    if (!gst_srt_base_sink_send_headers (sink, send_buffer_internal,
-            GINT_TO_POINTER (self->sock)))
-      return FALSE;
+  if (G_UNLIKELY (!self->sent_headers)) {
+    GstFlowReturn ret;
+
+    ret = gst_srt_base_sink_send_headers (sink, send_buffer_internal,
+        GINT_TO_POINTER (sink->sock));
+    if (ret != GST_FLOW_OK)
+      return ret;
 
     self->sent_headers = TRUE;
   }
 
-  return send_buffer_internal (sink, mapinfo, GINT_TO_POINTER (self->sock));
+  return send_buffer_internal (sink, buf, GINT_TO_POINTER (sink->sock));
 }
 
 static gboolean
 gst_srt_client_sink_stop (GstBaseSink * sink)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
-
-  GST_DEBUG_OBJECT (self, "closing SRT connection");
-
-  if (self->poll_id != SRT_ERROR) {
-    srt_epoll_remove_usock (self->poll_id, self->sock);
-    srt_epoll_release (self->poll_id);
-    self->poll_id = SRT_ERROR;
-  }
-
-  if (self->sock != SRT_INVALID_SOCK) {
-    srt_close (self->sock);
-    self->sock = SRT_INVALID_SOCK;
-  }
 
   g_clear_object (&self->sockaddr);
 
@@ -229,26 +244,22 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
   gobject_class->get_property = gst_srt_client_sink_get_property;
   gobject_class->finalize = gst_srt_client_sink_finalize;
 
-  properties[PROP_POLL_TIMEOUT] =
-      g_param_spec_int ("poll-timeout", "Poll Timeout",
-      "Return poll wait after timeout miliseconds (-1 = infinite)", -1,
-      G_MAXINT32, SRT_DEFAULT_POLL_TIMEOUT,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
-
   properties[PROP_BIND_ADDRESS] =
       g_param_spec_string ("bind-address", "Bind Address",
-      "Address to bind socket to (required for rendez-vous mode) ", NULL,
+      "Address to bind socket to (required for rendez-vous mode) ",
+      DEFAULT_BIND_ADDRESS,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_BIND_PORT] =
       g_param_spec_int ("bind-port", "Bind Port",
       "Port to bind socket to (Ignored in rendez-vous mode)", 0,
-      G_MAXUINT16, 0,
+      G_MAXUINT16, DEFAULT_BIND_PORT,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_RENDEZ_VOUS] =
       g_param_spec_boolean ("rendez-vous", "Rendez Vous",
-      "Work in Rendez-Vous mode instead of client/caller mode", FALSE,
+      "Work in Rendez-Vous mode instead of client/caller mode",
+      DEFAULT_RENDEZ_VOUS,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_STATS] = g_param_spec_boxed ("stats", "Statistics",
@@ -257,15 +268,14 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
-  gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
   gst_element_class_set_metadata (gstelement_class,
       "SRT client sink", "Sink/Network",
       "Send data over the network via SRT",
       "Justin Kim <justin.kim@collabora.com>");
 
-  gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_srt_client_sink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_client_sink_stop);
 
+  gstsrtbasesink_class->open = GST_DEBUG_FUNCPTR (gst_srt_client_sink_open);
   gstsrtbasesink_class->send_buffer =
       GST_DEBUG_FUNCPTR (gst_srt_client_sink_send_buffer);
 }
@@ -273,5 +283,7 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 static void
 gst_srt_client_sink_init (GstSRTClientSink * self)
 {
-  self->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
+  self->bind_address = DEFAULT_BIND_ADDRESS;
+  self->bind_port = DEFAULT_BIND_PORT;
+  self->rendez_vous = DEFAULT_RENDEZ_VOUS;
 }

@@ -23,6 +23,8 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstpushsrc.h>
+#include <srt/srt.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 

@@ -68,6 +68,10 @@ enum
 
 static GParamSpec *properties[PROP_LAST];
 
+#define DEFAULT_BIND_ADDRESS  NULL
+#define DEFAULT_BIND_PORT     0
+#define DEFAULT_RENDEZ_VOUS   FALSE
+
 #define gst_srt_client_sink_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstSRTClientSink, gst_srt_client_sink,
     GST_TYPE_SRT_BASE_SINK,
@@ -222,18 +226,20 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 
   properties[PROP_BIND_ADDRESS] =
       g_param_spec_string ("bind-address", "Bind Address",
-      "Address to bind socket to (required for rendez-vous mode) ", NULL,
+      "Address to bind socket to (required for rendez-vous mode) ",
+      DEFAULT_BIND_ADDRESS,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_BIND_PORT] =
       g_param_spec_int ("bind-port", "Bind Port",
       "Port to bind socket to (Ignored in rendez-vous mode)", 0,
-      G_MAXUINT16, 0,
+      G_MAXUINT16, DEFAULT_BIND_PORT,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_RENDEZ_VOUS] =
       g_param_spec_boolean ("rendez-vous", "Rendez Vous",
-      "Work in Rendez-Vous mode instead of client/caller mode", FALSE,
+      "Work in Rendez-Vous mode instead of client/caller mode",
+      DEFAULT_RENDEZ_VOUS,
       G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_STATS] = g_param_spec_boxed ("stats", "Statistics",
@@ -258,4 +264,7 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 static void
 gst_srt_client_sink_init (GstSRTClientSink * self)
 {
+  self->bind_address = DEFAULT_BIND_ADDRESS;
+  self->bind_port = DEFAULT_BIND_PORT;
+  self->rendez_vous = DEFAULT_RENDEZ_VOUS;
 }

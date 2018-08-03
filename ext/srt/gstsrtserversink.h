@@ -36,13 +36,22 @@ G_BEGIN_DECLS
 
 typedef struct _GstSRTServerSink GstSRTServerSink;
 typedef struct _GstSRTServerSinkClass GstSRTServerSinkClass;
-typedef struct _GstSRTServerSinkPrivate GstSRTServerSinkPrivate;
 
 struct _GstSRTServerSink {
   GstSRTBaseSink parent;
 
-  /*< private >*/
-  gpointer _gst_reserved[GST_PADDING];
+  gboolean cancelled;
+
+  SRTSOCKET sock;
+  gint poll_id;
+  gint poll_timeout;
+
+  GMainLoop *loop;
+  GMainContext *context;
+  GSource *server_source;
+  GThread *thread;
+
+  GList *clients;
 };
 
 struct _GstSRTServerSinkClass {
@@ -50,8 +59,6 @@ struct _GstSRTServerSinkClass {
 
   void (*client_added)      (GstSRTServerSink *self, int sock, GSocketAddress *addr);
   void (*client_removed)    (GstSRTServerSink *self, int sock, GSocketAddress *addr);
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

@@ -38,13 +38,19 @@ G_BEGIN_DECLS
 
 typedef struct _GstSRTServerSrc GstSRTServerSrc;
 typedef struct _GstSRTServerSrcClass GstSRTServerSrcClass;
-typedef struct _GstSRTServerSrcPrivate GstSRTServerSrcPrivate;
 
 struct _GstSRTServerSrc {
   GstSRTBaseSrc parent;
 
-  /*< private >*/
-  gpointer _gst_reserved[GST_PADDING];
+  SRTSOCKET sock;
+  SRTSOCKET client_sock;
+  GSocketAddress *client_sockaddr;
+
+  gint poll_id;
+  gint poll_timeout;
+
+  gboolean has_client;
+  gboolean cancelled;
 };
 
 struct _GstSRTServerSrcClass {
@@ -52,8 +58,6 @@ struct _GstSRTServerSrcClass {
 
   void (*client_added)      (GstSRTServerSrc *self, int sock, GSocketAddress *addr);
   void (*client_closed)     (GstSRTServerSrc *self, int sock, GSocketAddress *addr);
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

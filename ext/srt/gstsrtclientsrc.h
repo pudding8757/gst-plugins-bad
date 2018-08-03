@@ -36,19 +36,21 @@ G_BEGIN_DECLS
 
 typedef struct _GstSRTClientSrc GstSRTClientSrc;
 typedef struct _GstSRTClientSrcClass GstSRTClientSrcClass;
-typedef struct _GstSRTClientSrcPrivate GstSRTClientSrcPrivate;
 
 struct _GstSRTClientSrc {
   GstSRTBaseSrc parent;
 
-  /*< private >*/
-  gpointer _gst_reserved[GST_PADDING];
+  SRTSOCKET sock;
+  gint poll_id;
+  gint poll_timeout;
+
+  gboolean rendez_vous;
+  gchar *bind_address;
+  guint16 bind_port;
 };
 
 struct _GstSRTClientSrcClass {
   GstSRTBaseSrcClass parent_class;
-
-  gpointer _gst_reserved[GST_PADDING_LARGE];
 };
 
 GST_EXPORT

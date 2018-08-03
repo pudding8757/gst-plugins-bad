@@ -47,7 +47,6 @@ struct _GstSRTServerSrc {
   GSocketAddress *client_sockaddr;
 
   gint poll_id;
-  gint poll_timeout;
 
   gboolean has_client;
   gboolean cancelled;

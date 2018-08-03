@@ -42,7 +42,6 @@ struct _GstSRTClientSrc {
 
   SRTSOCKET sock;
   gint poll_id;
-  gint poll_timeout;
 
   gboolean rendez_vous;
   gchar *bind_address;

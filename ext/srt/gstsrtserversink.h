@@ -44,7 +44,6 @@ struct _GstSRTServerSink {
 
   SRTSOCKET sock;
   gint poll_id;
-  gint poll_timeout;
 
   GMainLoop *loop;
   GMainContext *context;

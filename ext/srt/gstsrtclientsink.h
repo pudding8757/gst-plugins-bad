@@ -43,7 +43,6 @@ struct _GstSRTClientSink {
   SRTSOCKET sock;
   GSocketAddress *sockaddr;
   gint poll_id;
-  gint poll_timeout;
 
   gboolean rendez_vous;
   gchar *bind_address;

@@ -57,11 +57,9 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
 #define GST_CAT_DEFAULT gst_debug_srt_client_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
 enum
 {
-  PROP_POLL_TIMEOUT = 1,
-  PROP_BIND_ADDRESS,
+  PROP_BIND_ADDRESS = 1,
   PROP_BIND_PORT,
   PROP_RENDEZ_VOUS,
 
@@ -69,7 +67,7 @@ enum
   PROP_LAST
 };
 
-static GParamSpec *properties[PROP_LAST + 1];
+static GParamSpec *properties[PROP_LAST];
 
 #define gst_srt_client_src_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstSRTClientSrc, gst_srt_client_src,
@@ -84,9 +82,6 @@ gst_srt_client_src_get_property (GObject * object,
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      g_value_set_int (value, self->poll_timeout);
-      break;
     case PROP_BIND_PORT:
       g_value_set_int (value, self->bind_port);
       break;
@@ -109,9 +104,6 @@ gst_srt_client_src_set_property (GObject * object,
   GstSRTClientSrc *self = GST_SRT_CLIENT_SRC (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      self->poll_timeout = g_value_get_int (value);
-      break;
     case PROP_BIND_ADDRESS:
       g_free (self->bind_address);
       self->bind_address = g_value_dup_string (value);
@@ -158,14 +150,10 @@ gst_srt_client_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   gint recv_len;
 
   if (srt_epoll_wait (self->poll_id, ready, &(int) {
-          2}, 0, 0, self->poll_timeout, 0, 0, 0, 0) == -1) {
-
-    /* Assuming that timeout error is normal */
-    if (srt_getlasterror (NULL) != SRT_ETIMEOUT) {
-      GST_ELEMENT_ERROR (src, RESOURCE, READ,
-          (NULL), ("srt_epoll_wait error: %s", srt_getlasterror_str ()));
-      ret = GST_FLOW_ERROR;
-    }
+          2}, 0, 0, -1, 0, 0, 0, 0) == SRT_ERROR) {
+    GST_ELEMENT_ERROR (src, RESOURCE, READ,
+        (NULL), ("srt_epoll_wait error: %s", srt_getlasterror_str ()));
+    ret = GST_FLOW_ERROR;
     srt_clearlasterror ();
     goto out;
   }
@@ -252,17 +240,6 @@ gst_srt_client_src_class_init (GstSRTClientSrcClass * klass)
   gobject_class->get_property = gst_srt_client_src_get_property;
   gobject_class->finalize = gst_srt_client_src_finalize;
 
-  /**
-   * GstSRTClientSrc:poll-timeout:
-   *
-   * The timeout(ms) value when polling SRT socket.
-   */
-  properties[PROP_POLL_TIMEOUT] =
-      g_param_spec_int ("poll-timeout", "Poll timeout",
-      "Return poll wait after timeout miliseconds (-1 = infinite)", -1,
-      G_MAXINT32, SRT_DEFAULT_POLL_TIMEOUT,
-      G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS);
-
   properties[PROP_BIND_ADDRESS] =
       g_param_spec_string ("bind-address", "Bind Address",
       "Address to bind socket to (required for rendez-vous mode) ", NULL,
@@ -298,7 +275,6 @@ gst_srt_client_src_init (GstSRTClientSrc * self)
 {
   self->sock = SRT_INVALID_SOCK;
   self->poll_id = SRT_ERROR;
-  self->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
   self->rendez_vous = FALSE;
   self->bind_address = NULL;
   self->bind_port = 0;

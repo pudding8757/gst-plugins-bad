@@ -44,8 +44,6 @@
 #include <srt/srt.h>
 #include <gio/gio.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
-
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
@@ -56,8 +54,7 @@ GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
 enum
 {
-  PROP_POLL_TIMEOUT = 1,
-  PROP_STATS,
+  PROP_STATS = 1,
   /*< private > */
   PROP_LAST
 };
@@ -126,9 +123,6 @@ gst_srt_server_sink_get_property (GObject * object,
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      g_value_set_int (value, self->poll_timeout);
-      break;
     case PROP_STATS:
     {
       GList *item;
@@ -156,12 +150,7 @@ static void
 gst_srt_server_sink_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
-  GstSRTServerSink *self = GST_SRT_SERVER_SINK (object);
-
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      self->poll_timeout = g_value_get_int (value);
-      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -180,22 +169,11 @@ idle_listen_callback (gpointer data)
   int sa_len;
 
   if (srt_epoll_wait (self->poll_id, ready, &(int) {
-          2}, 0, 0, self->poll_timeout, 0, 0, 0, 0) == -1) {
-    int srt_errno = srt_getlasterror (NULL);
-
-    if (srt_errno != SRT_ETIMEOUT) {
-      GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
-          ("SRT error: %s", srt_getlasterror_str ()), (NULL));
-      ret = FALSE;
-      goto out;
-    }
-
-    /* Mimicking cancellable */
-    if (srt_errno == SRT_ETIMEOUT && self->cancelled) {
-      GST_DEBUG_OBJECT (self, "Cancelled waiting for client");
-      ret = FALSE;
-      goto out;
-    }
+          2}, 0, 0, -1, 0, 0, 0, 0) == SRT_ERROR) {
+    GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
+        ("SRT error: %s", srt_getlasterror_str ()), (NULL));
+    ret = FALSE;
+    goto out;
   }
 
   client = srt_client_new ();
@@ -419,12 +397,6 @@ gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
   gobject_class->set_property = gst_srt_server_sink_set_property;
   gobject_class->get_property = gst_srt_server_sink_get_property;
 
-  properties[PROP_POLL_TIMEOUT] =
-      g_param_spec_int ("poll-timeout", "Poll Timeout",
-      "Return poll wait after timeout miliseconds (-1 = infinite)", -1,
-      G_MAXINT32, SRT_DEFAULT_POLL_TIMEOUT,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
-
   properties[PROP_STATS] = gst_param_spec_array ("stats", "Statistics",
       "Array of GstStructures containing SRT statistics",
       g_param_spec_boxed ("stats", "Statistics",
@@ -483,5 +455,4 @@ gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
 static void
 gst_srt_server_sink_init (GstSRTServerSink * self)
 {
-  self->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
 }

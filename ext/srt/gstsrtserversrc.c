@@ -43,8 +43,6 @@
 #include "gstsrt.h"
 #include <gio/gio.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT 100
-
 static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
@@ -52,16 +50,6 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
 
 #define GST_CAT_DEFAULT gst_debug_srt_server_src
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
-
-enum
-{
-  PROP_POLL_TIMEOUT = 1,
-
-  /*< private > */
-  PROP_LAST
-};
-
-static GParamSpec *properties[PROP_LAST];
 
 enum
 {
@@ -78,38 +66,6 @@ G_DEFINE_TYPE_WITH_CODE (GstSRTServerSrc, gst_srt_server_src,
     GST_TYPE_SRT_BASE_SRC,
     GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtserversrc", 0,
         "SRT Server Source"));
-
-static void
-gst_srt_server_src_get_property (GObject * object,
-    guint prop_id, GValue * value, GParamSpec * pspec)
-{
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (object);
-
-  switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      g_value_set_int (value, self->poll_timeout);
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
-  }
-}
-
-static void
-gst_srt_server_src_set_property (GObject * object,
-    guint prop_id, const GValue * value, GParamSpec * pspec)
-{
-  GstSRTServerSrc *self = GST_SRT_SERVER_SRC (object);
-
-  switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      self->poll_timeout = g_value_get_int (value);
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
-  }
-}
 
 static void
 gst_srt_server_src_finalize (GObject * object)
@@ -141,27 +97,12 @@ gst_srt_server_src_fill (GstPushSrc * src, GstBuffer * outbuf)
   size_t client_sa_len;
 
   while (!self->has_client) {
-    GST_DEBUG_OBJECT (self, "poll wait (timeout: %d)", self->poll_timeout);
-
     if (srt_epoll_wait (self->poll_id, ready, &(int) {
-            2}, 0, 0, self->poll_timeout, 0, 0, 0, 0) == -1) {
-      int srt_errno = srt_getlasterror (NULL);
+            2}, 0, 0, -1, 0, 0, 0, 0) == SRT_ERROR) {
+      GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
+          ("SRT error: %s", srt_getlasterror_str ()), (NULL));
 
-      /* Assuming that timeout error is normal */
-      if (srt_errno != SRT_ETIMEOUT) {
-        GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
-            ("SRT error: %s", srt_getlasterror_str ()), (NULL));
-
-        return GST_FLOW_ERROR;
-      }
-
-      /* Mimicking cancellable */
-      if (srt_errno == SRT_ETIMEOUT && self->cancelled) {
-        GST_DEBUG_OBJECT (self, "Cancelled waiting for client");
-        return GST_FLOW_FLUSHING;
-      }
-
-      continue;
+      return GST_FLOW_ERROR;
     }
 
     self->client_sock =
@@ -327,23 +268,7 @@ gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
   GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
   GstPushSrcClass *gstpushsrc_class = GST_PUSH_SRC_CLASS (klass);
 
-  gobject_class->set_property = gst_srt_server_src_set_property;
-  gobject_class->get_property = gst_srt_server_src_get_property;
   gobject_class->finalize = gst_srt_server_src_finalize;
-
-  /**
-   * GstSRTServerSrc:poll-timeout:
-   *
-   * The timeout(ms) value when polling SRT socket. For #GstSRTServerSrc,
-   * this value shouldn't be set as -1 (infinite) because "srt_epoll_wait"
-   * isn't cancellable unless closing the socket.
-   */
-  properties[PROP_POLL_TIMEOUT] =
-      g_param_spec_int ("poll-timeout", "Poll timeout",
-      "Return poll wait after timeout miliseconds", 0, G_MAXINT32,
-      SRT_DEFAULT_POLL_TIMEOUT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
-
-  g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
   /**
    * GstSRTServerSrc::client-added:
@@ -396,5 +321,4 @@ gst_srt_server_src_init (GstSRTServerSrc * self)
   self->sock = SRT_INVALID_SOCK;
   self->client_sock = SRT_INVALID_SOCK;
   self->poll_id = SRT_ERROR;
-  self->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
 }

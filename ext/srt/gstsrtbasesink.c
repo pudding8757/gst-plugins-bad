@@ -26,8 +26,6 @@
 #include "gstsrt.h"
 #include <srt/srt.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
-
 #define GST_CAT_DEFAULT gst_debug_srt_base_sink
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 

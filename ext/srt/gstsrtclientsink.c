@@ -48,8 +48,6 @@
 #include <srt/srt.h>
 #include <gio/gio.h>
 
-#define SRT_DEFAULT_POLL_TIMEOUT -1
-
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
@@ -60,8 +58,7 @@ GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
 enum
 {
-  PROP_POLL_TIMEOUT = 1,
-  PROP_BIND_ADDRESS,
+  PROP_BIND_ADDRESS = 1,
   PROP_BIND_PORT,
   PROP_RENDEZ_VOUS,
   PROP_STATS,
@@ -84,9 +81,6 @@ gst_srt_client_sink_get_property (GObject * object,
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      g_value_set_int (value, self->poll_timeout);
-      break;
     case PROP_BIND_PORT:
       g_value_set_int (value, self->bind_port);
       break;
@@ -113,9 +107,6 @@ gst_srt_client_sink_set_property (GObject * object,
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (object);
 
   switch (prop_id) {
-    case PROP_POLL_TIMEOUT:
-      self->poll_timeout = g_value_get_int (value);
-      break;
     case PROP_BIND_ADDRESS:
       g_free (self->bind_address);
       self->bind_address = g_value_dup_string (value);
@@ -229,12 +220,6 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
   gobject_class->get_property = gst_srt_client_sink_get_property;
   gobject_class->finalize = gst_srt_client_sink_finalize;
 
-  properties[PROP_POLL_TIMEOUT] =
-      g_param_spec_int ("poll-timeout", "Poll Timeout",
-      "Return poll wait after timeout miliseconds (-1 = infinite)", -1,
-      G_MAXINT32, SRT_DEFAULT_POLL_TIMEOUT,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
-
   properties[PROP_BIND_ADDRESS] =
       g_param_spec_string ("bind-address", "Bind Address",
       "Address to bind socket to (required for rendez-vous mode) ", NULL,
@@ -273,5 +258,4 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 static void
 gst_srt_client_sink_init (GstSRTClientSink * self)
 {
-  self->poll_timeout = SRT_DEFAULT_POLL_TIMEOUT;
 }

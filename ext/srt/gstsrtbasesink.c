@@ -22,7 +22,7 @@
 #include "config.h"
 #endif
 
-#include "gstsrtserversink.h"
+#include "gstsrtbasesink.h"
 #include "gstsrt.h"
 #include <srt/srt.h>
 

@@ -46,6 +46,9 @@ struct _GstSRTClientSink {
   gboolean rendez_vous;
   gchar *bind_address;
   guint16 bind_port;
+
+  GCancellable *cancellable;
+  SYSSOCKET event_fd;
 };
 
 struct _GstSRTClientSinkClass {

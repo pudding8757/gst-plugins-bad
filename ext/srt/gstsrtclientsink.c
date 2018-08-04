@@ -134,6 +134,9 @@ gst_srt_client_sink_finalize (GObject * object)
 
   g_free (self->bind_address);
 
+  g_cancellable_release_fd (self->cancellable);
+  g_object_unref (self->cancellable);
+
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -161,7 +164,47 @@ gst_srt_client_sink_start (GstBaseSink * sink)
 
   self->handle = handle;
 
+  /* Add our event fd to cancel srt_epoll_wait */
+  srt_epoll_add_ssock (self->poll_id, self->event_fd, NULL);
+
+  /* Make non-blocking */
+  srt_setsockopt (handle->sock, 0, SRTO_SNDSYN, &(int) {
+      0}, sizeof (int));
+
   return TRUE;
+}
+
+static GstFlowReturn
+gst_srt_client_sink_send_message (GstSRTBaseSink * sink)
+{
+  GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
+  GstSRTClientHandle *handle = self->handle;
+  SRTSOCKET ready[2];
+  SYSSOCKET cancellable[2];
+  SRT_SOCKSTATUS status;
+
+  if (srt_epoll_wait (self->poll_id, 0, 0, ready, &(int) {
+          2}, -1, cancellable, &(int) {
+          2}, 0, 0) == SRT_ERROR) {
+    if (g_cancellable_is_cancelled (self->cancellable))
+      return GST_FLOW_FLUSHING;
+
+    GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
+        ("SRT error: %s", srt_getlasterror_str ()), (NULL));
+    return GST_FLOW_ERROR;
+  }
+
+  if (g_cancellable_is_cancelled (self->cancellable))
+    return GST_FLOW_FLUSHING;
+
+  status = srt_getsockstate (handle->sock);
+
+  if (G_UNLIKELY (status != SRTS_CONNECTED)) {
+    GST_ERROR_OBJECT (self, "socket disconnected, status %d", status);
+    return GST_FLOW_ERROR;
+  }
+
+  return gst_srt_base_sink_client_send_message (sink, handle);
 }
 
 static GstFlowReturn
@@ -176,7 +219,7 @@ gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink, GstBuffer * buffer)
 
   while (handle->queue && (ret == GST_FLOW_OK
           || ret == GST_SRT_FLOW_SEND_AGAIN)) {
-    ret = gst_srt_base_sink_client_send_message (sink, handle);
+    ret = gst_srt_client_sink_send_message (sink);
   }
 
   if (ret == GST_SRT_FLOW_SEND_ERROR)
@@ -195,15 +238,43 @@ gst_srt_client_sink_stop (GstBaseSink * sink)
 
   self->handle = NULL;
 
+  /* Interrupt srt_epoll_wait */
+  g_cancellable_cancel (self->cancellable);
+
   if (self->poll_id != SRT_ERROR) {
     if (handle && handle->sock != SRT_INVALID_SOCK)
       srt_epoll_remove_usock (self->poll_id, handle->sock);
+    srt_epoll_remove_ssock (self->poll_id, self->event_fd);
     srt_epoll_release (self->poll_id);
     self->poll_id = SRT_ERROR;
   }
 
   if (handle)
     gst_srt_client_handle_unref (handle);
+
+  g_cancellable_reset (self->cancellable);
+
+  return TRUE;
+}
+
+static gboolean
+gst_srt_client_sink_unlock (GstBaseSink * sink)
+{
+  GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
+
+  GST_DEBUG_OBJECT (self, "Unlock");
+  g_cancellable_cancel (self->cancellable);
+
+  return TRUE;
+}
+
+static gboolean
+gst_srt_client_sink_unlock_stop (GstBaseSink * sink)
+{
+  GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
+
+  GST_DEBUG_OBJECT (self, "Unlock stop");
+  g_cancellable_reset (self->cancellable);
 
   return TRUE;
 }
@@ -252,6 +323,9 @@ gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
 
   gstbasesink_class->start = GST_DEBUG_FUNCPTR (gst_srt_client_sink_start);
   gstbasesink_class->stop = GST_DEBUG_FUNCPTR (gst_srt_client_sink_stop);
+  gstbasesink_class->unlock = GST_DEBUG_FUNCPTR (gst_srt_client_sink_unlock);
+  gstbasesink_class->unlock_stop =
+      GST_DEBUG_FUNCPTR (gst_srt_client_sink_unlock_stop);
 
   gstsrtbasesink_class->send_buffer =
       GST_DEBUG_FUNCPTR (gst_srt_client_sink_send_buffer);
@@ -263,4 +337,6 @@ gst_srt_client_sink_init (GstSRTClientSink * self)
   self->bind_address = DEFAULT_BIND_ADDRESS;
   self->bind_port = DEFAULT_BIND_PORT;
   self->rendez_vous = DEFAULT_RENDEZ_VOUS;
+  self->cancellable = g_cancellable_new ();
+  self->event_fd = g_cancellable_get_fd (self->cancellable);
 }

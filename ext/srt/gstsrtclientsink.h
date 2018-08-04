@@ -40,15 +40,12 @@ typedef struct _GstSRTClientSinkClass GstSRTClientSinkClass;
 struct _GstSRTClientSink {
   GstSRTBaseSink parent;
 
-  SRTSOCKET sock;
-  GSocketAddress *sockaddr;
+  GstSRTClientHandle *handle;
   gint poll_id;
 
   gboolean rendez_vous;
   gchar *bind_address;
   guint16 bind_port;
-
-  gboolean sent_headers;
 };
 
 struct _GstSRTClientSinkClass {

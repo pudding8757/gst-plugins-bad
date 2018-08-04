@@ -38,14 +38,29 @@ G_BEGIN_DECLS
 #define GST_SRT_BASE_SINK_CAST(obj)         ((GstSRTBaseSink*)(obj))
 #define GST_SRT_BASE_SINK_CLASS_CAST(klass) ((GstSRTBaseSinkClass*)(klass))
 
+#define GST_SRT_FLOW_SEND_AGAIN GST_FLOW_CUSTOM_ERROR
+#define GST_SRT_FLOW_SEND_ERROR GST_FLOW_CUSTOM_ERROR_1
+
 typedef struct _GstSRTBaseSink GstSRTBaseSink;
 typedef struct _GstSRTBaseSinkClass GstSRTBaseSinkClass;
+typedef struct _GstSRTClientHandle GstSRTClientHandle;
+
+struct _GstSRTClientHandle {
+  GstSRTBaseSink *sink;
+
+  SRTSOCKET sock;
+  GSocketAddress *sockaddr;
+
+  GSList *queue;
+  GstCaps *caps;
+
+  gint ref_count;
+};
 
 struct _GstSRTBaseSink {
   GstBaseSink parent;
 
   GstUri *uri;
-  GstBufferList *headers;
   gint latency;
   gchar *passphrase;
   gint key_length;
@@ -58,7 +73,7 @@ struct _GstSRTBaseSinkClass {
   GstBaseSinkClass parent_class;
 
   /* ask the subclass to send a buffer */
-  gboolean (*send_buffer)       (GstSRTBaseSink *self, const GstMapInfo *mapinfo);
+  GstFlowReturn (*send_buffer)       (GstSRTBaseSink *self, GstBuffer *buf);
 
   gpointer _gst_reserved[GST_PADDING_LARGE];
 };
@@ -66,14 +81,18 @@ struct _GstSRTBaseSinkClass {
 GST_EXPORT
 GType gst_srt_base_sink_get_type (void);
 
-typedef gboolean (*GstSRTBaseSinkSendCallback) (GstSRTBaseSink *sink,
-    const GstMapInfo *mapinfo, gpointer user_data);
+GstStructure * gst_srt_base_sink_get_stats (GstSRTClientHandle *handle);
 
-gboolean gst_srt_base_sink_send_headers (GstSRTBaseSink *sink,
-    GstSRTBaseSinkSendCallback send_cb, gpointer user_data);
+gboolean gst_srt_base_sink_client_queue_buffer (GstSRTBaseSink *sink,
+    GstSRTClientHandle *handle, GstBuffer *buffer);
 
-GstStructure * gst_srt_base_sink_get_stats (GSocketAddress *sockaddr,
-    SRTSOCKET sock);
+GstFlowReturn gst_srt_base_sink_client_send_message (GstSRTBaseSink *sink,
+    GstSRTClientHandle *handle);
+
+GstSRTClientHandle * gst_srt_client_handle_new (GstSRTBaseSink *sink);
+
+GstSRTClientHandle * gst_srt_client_handle_ref (GstSRTClientHandle *handle);
+void gst_srt_client_handle_unref (GstSRTClientHandle *handle);
 
 
 G_END_DECLS

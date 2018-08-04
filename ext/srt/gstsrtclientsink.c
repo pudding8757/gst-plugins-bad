@@ -95,8 +95,8 @@ gst_srt_client_sink_get_property (GObject * object,
       g_value_set_boolean (value, self->rendez_vous);
       break;
     case PROP_STATS:
-      g_value_take_boxed (value, gst_srt_base_sink_get_stats (self->sockaddr,
-              self->sock));
+      if (self->handle)
+        g_value_take_boxed (value, gst_srt_base_sink_get_stats (self->handle));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -143,73 +143,69 @@ gst_srt_client_sink_start (GstBaseSink * sink)
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
   GstSRTBaseSink *base = GST_SRT_BASE_SINK (sink);
   GstUri *uri = gst_uri_ref (GST_SRT_BASE_SINK (self)->uri);
+  GstSRTClientHandle *handle;
 
-  self->sock = gst_srt_client_connect (GST_ELEMENT (sink), TRUE,
+  handle = gst_srt_client_handle_new (base);
+
+  handle->sock = gst_srt_client_connect (GST_ELEMENT (sink), TRUE,
       gst_uri_get_host (uri), gst_uri_get_port (uri), self->rendez_vous,
       self->bind_address, self->bind_port, base->latency,
-      &self->sockaddr, &self->poll_id, base->passphrase, base->key_length);
+      &handle->sockaddr, &self->poll_id, base->passphrase, base->key_length);
 
   g_clear_pointer (&uri, gst_uri_unref);
 
-  return (self->sock != SRT_INVALID_SOCK);
-}
-
-static gboolean
-send_buffer_internal (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo, gpointer user_data)
-{
-  SRTSOCKET sock = GPOINTER_TO_INT (user_data);
-
-  if (srt_sendmsg2 (sock, (char *) mapinfo->data, mapinfo->size,
-          0) == SRT_ERROR) {
-    GST_ELEMENT_ERROR (sink, RESOURCE, WRITE, NULL,
-        ("%s", srt_getlasterror_str ()));
+  if (handle->sock == SRT_INVALID_SOCK) {
+    gst_srt_client_handle_unref (handle);
     return FALSE;
   }
+
+  self->handle = handle;
 
   return TRUE;
 }
 
-static gboolean
-gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo)
+static GstFlowReturn
+gst_srt_client_sink_send_buffer (GstSRTBaseSink * sink, GstBuffer * buffer)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
+  GstSRTClientHandle *handle = self->handle;
+  GstFlowReturn ret = GST_FLOW_OK;
 
-  if (!self->sent_headers) {
-    if (!gst_srt_base_sink_send_headers (sink, send_buffer_internal,
-            GINT_TO_POINTER (self->sock)))
-      return FALSE;
+  if (!gst_srt_base_sink_client_queue_buffer (sink, handle, buffer))
+    return GST_FLOW_ERROR;
 
-    self->sent_headers = TRUE;
+  while (handle->queue && (ret == GST_FLOW_OK
+          || ret == GST_SRT_FLOW_SEND_AGAIN)) {
+    ret = gst_srt_base_sink_client_send_message (sink, handle);
   }
 
-  return send_buffer_internal (sink, mapinfo, GINT_TO_POINTER (self->sock));
+  if (ret == GST_SRT_FLOW_SEND_ERROR)
+    ret = GST_FLOW_ERROR;
+
+  return ret;
 }
 
 static gboolean
 gst_srt_client_sink_stop (GstBaseSink * sink)
 {
   GstSRTClientSink *self = GST_SRT_CLIENT_SINK (sink);
+  GstSRTClientHandle *handle = self->handle;
 
   GST_DEBUG_OBJECT (self, "closing SRT connection");
 
+  self->handle = NULL;
+
   if (self->poll_id != SRT_ERROR) {
-    srt_epoll_remove_usock (self->poll_id, self->sock);
+    if (handle && handle->sock != SRT_INVALID_SOCK)
+      srt_epoll_remove_usock (self->poll_id, handle->sock);
     srt_epoll_release (self->poll_id);
     self->poll_id = SRT_ERROR;
   }
 
-  if (self->sock != SRT_INVALID_SOCK) {
-    srt_close (self->sock);
-    self->sock = SRT_INVALID_SOCK;
-  }
+  if (handle)
+    gst_srt_client_handle_unref (handle);
 
-  g_clear_object (&self->sockaddr);
-
-  self->sent_headers = FALSE;
-
-  return GST_BASE_SINK_CLASS (parent_class)->stop (sink);
+  return TRUE;
 }
 
 static void

@@ -40,17 +40,19 @@ typedef struct _GstSRTServerSinkClass GstSRTServerSinkClass;
 struct _GstSRTServerSink {
   GstSRTBaseSink parent;
 
-  gboolean cancelled;
-
   SRTSOCKET sock;
   gint poll_id;
 
-  GMainLoop *loop;
-  GMainContext *context;
-  GSource *server_source;
-  GThread *thread;
+  GCancellable *cancellable;
+  SYSSOCKET event_fd;
 
-  GList *clients;
+  GstTask *event_task;
+  GRecMutex event_lock;
+  GMutex clients_lock;
+  GCond clients_cond;
+
+  GHashTable *clients_hash;
+  gboolean need_data;
 };
 
 struct _GstSRTServerSinkClass {

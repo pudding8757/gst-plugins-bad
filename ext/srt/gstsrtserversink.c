@@ -77,37 +77,8 @@ G_DEFINE_TYPE_WITH_CODE (GstSRTServerSink, gst_srt_server_sink,
     GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srtserversink", 0,
         "SRT Server Sink"));
 
-typedef struct
-{
-  int sock;
-  GSocketAddress *sockaddr;
-  gboolean sent_headers;
-} SRTClient;
-
-static SRTClient *
-srt_client_new (void)
-{
-  SRTClient *client = g_new0 (SRTClient, 1);
-  client->sock = SRT_INVALID_SOCK;
-  return client;
-}
-
 static void
-srt_client_free (SRTClient * client)
-{
-  g_return_if_fail (client != NULL);
-
-  g_clear_object (&client->sockaddr);
-
-  if (client->sock != SRT_INVALID_SOCK) {
-    srt_close (client->sock);
-  }
-
-  g_free (client);
-}
-
-static void
-srt_emit_client_removed (SRTClient * client, gpointer user_data)
+srt_emit_client_removed (GstSRTClientHandle * client, gpointer user_data)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (user_data);
   g_return_if_fail (client != NULL && GST_IS_SRT_SERVER_SINK (self));
@@ -129,12 +100,11 @@ gst_srt_server_sink_get_property (GObject * object,
 
       GST_OBJECT_LOCK (self);
       for (item = self->clients; item; item = item->next) {
-        SRTClient *client = item->data;
+        GstSRTClientHandle *client = item->data;
         GValue tmp = G_VALUE_INIT;
 
         g_value_init (&tmp, GST_TYPE_STRUCTURE);
-        g_value_take_boxed (&tmp, gst_srt_base_sink_get_stats (client->sockaddr,
-                client->sock));
+        g_value_take_boxed (&tmp, gst_srt_base_sink_get_stats (client));
         gst_value_array_append_and_take_value (value, &tmp);
       }
       GST_OBJECT_UNLOCK (self);
@@ -163,7 +133,7 @@ idle_listen_callback (gpointer data)
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (data);
   gboolean ret = TRUE;
 
-  SRTClient *client;
+  GstSRTClientHandle *client;
   SRTSOCKET ready[2];
   struct sockaddr sa;
   int sa_len;
@@ -176,14 +146,14 @@ idle_listen_callback (gpointer data)
     goto out;
   }
 
-  client = srt_client_new ();
+  client = gst_srt_client_handle_new (GST_SRT_BASE_SINK (self));
   client->sock = srt_accept (self->sock, &sa, &sa_len);
 
   if (client->sock == SRT_INVALID_SOCK) {
     GST_WARNING_OBJECT (self, "detected invalid SRT client socket (reason: %s)",
         srt_getlasterror_str ());
     srt_clearlasterror ();
-    srt_client_free (client);
+    gst_srt_client_handle_unref (client);
     ret = FALSE;
     goto out;
   }
@@ -276,42 +246,35 @@ failed:
   return FALSE;
 }
 
-static gboolean
-send_buffer_internal (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo, gpointer user_data)
-{
-  SRTClient *client = user_data;
-
-  if (srt_sendmsg2 (client->sock, (char *) mapinfo->data, mapinfo->size,
-          0) == SRT_ERROR) {
-    GST_WARNING_OBJECT (sink, "%s", srt_getlasterror_str ());
-    return FALSE;
-  }
-
-  return TRUE;
-}
-
-static gboolean
-gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink,
-    const GstMapInfo * mapinfo)
+static GstFlowReturn
+gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink, GstBuffer * buffer)
 {
   GstSRTServerSink *self = GST_SRT_SERVER_SINK (sink);
   GList *clients = self->clients;
 
   GST_OBJECT_LOCK (sink);
   while (clients != NULL) {
-    SRTClient *client = clients->data;
+    GstSRTClientHandle *client = clients->data;
+    GstFlowReturn ret = GST_FLOW_OK;
     clients = clients->next;
 
-    if (!client->sent_headers) {
-      if (!gst_srt_base_sink_send_headers (sink, send_buffer_internal, client))
-        goto err;
+    if (!gst_srt_base_sink_client_queue_buffer (sink, client, buffer))
+      return GST_FLOW_ERROR;
 
-      client->sent_headers = TRUE;
+    while (client->queue && ret == GST_FLOW_OK) {
+      ret = gst_srt_base_sink_client_send_message (sink, client);
     }
 
-    if (!send_buffer_internal (sink, mapinfo, client))
-      goto err;
+    if (ret != GST_FLOW_OK) {
+      if (ret == GST_SRT_FLOW_SEND_ERROR) {
+        GST_DEBUG_OBJECT (self,
+            "Failed to send message, remove client %p", client);
+        goto err;
+      }
+
+      GST_OBJECT_UNLOCK (sink);
+      return ret;
+    }
 
     continue;
 
@@ -320,12 +283,12 @@ gst_srt_server_sink_send_buffer (GstSRTBaseSink * sink,
     GST_OBJECT_UNLOCK (sink);
     g_signal_emit (self, signals[SIG_CLIENT_REMOVED], 0, client->sock,
         client->sockaddr);
-    srt_client_free (client);
+    gst_srt_client_handle_unref (client);
     GST_OBJECT_LOCK (sink);
   }
   GST_OBJECT_UNLOCK (sink);
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 static gboolean
@@ -342,7 +305,7 @@ gst_srt_server_sink_stop (GstBaseSink * sink)
   GST_OBJECT_UNLOCK (sink);
 
   g_list_foreach (clients, (GFunc) srt_emit_client_removed, self);
-  g_list_free_full (clients, (GDestroyNotify) srt_client_free);
+  g_list_free_full (clients, (GDestroyNotify) gst_srt_client_handle_unref);
 
   GST_DEBUG_OBJECT (self, "closing SRT connection");
   srt_epoll_remove_usock (self->poll_id, self->sock);
@@ -363,7 +326,7 @@ gst_srt_server_sink_stop (GstBaseSink * sink)
 
   g_clear_pointer (&self->context, g_main_context_unref);
 
-  return GST_BASE_SINK_CLASS (parent_class)->stop (sink);
+  return TRUE;
 }
 
 static gboolean

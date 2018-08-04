@@ -242,7 +242,7 @@ GST_START_TEST (test_serversrc_client_added_closed)
   g_cond_init (&data.cond);
 
   GST_INFO ("Check clientsink and seversrc pair");
-  fail_unless (srtsrc_setup (&src, &sinkpad, "srt://:9999", -1, TRUE));
+  fail_unless (srtsrc_setup (&src, &sinkpad, "srt://localhost:9999", -1, TRUE));
 
   g_signal_connect (src, "client-added", G_CALLBACK (client_added), &data);
   g_signal_connect (src, "client-closed", G_CALLBACK (client_closed), &data);
@@ -310,7 +310,8 @@ GST_START_TEST (test_serversink_client_added_removed)
   g_cond_init (&data.cond);
 
   GST_INFO ("Check serversink and clientsrc pair");
-  fail_unless (srtsink_setup (&sink, &srcpad, "srt://:9999", -1, TRUE));
+  fail_unless (srtsink_setup (&sink, &srcpad, "srt://localhost:9999", -1,
+          TRUE));
 
   g_signal_connect (sink, "client-added", G_CALLBACK (client_added), &data);
   g_signal_connect (sink, "client-removed", G_CALLBACK (client_closed), &data);

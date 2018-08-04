@@ -44,6 +44,12 @@ typedef struct _GstSRTBaseSink GstSRTBaseSink;
 typedef struct _GstSRTBaseSinkClass GstSRTBaseSinkClass;
 typedef struct _GstSRTClientHandle GstSRTClientHandle;
 
+typedef enum {
+  SRT_CLIENT_INIT = 0,
+  SRT_CLIENT_STARTED,
+  SRT_CLIENT_STOPPED
+} GstSRTClientState;
+
 struct _GstSRTClientHandle {
   GstSRTBaseSink *sink;
 
@@ -54,6 +60,8 @@ struct _GstSRTClientHandle {
   GstCaps *caps;
 
   gint ref_count;
+
+  GstSRTClientState state;
 };
 
 struct _GstSRTBaseSink {

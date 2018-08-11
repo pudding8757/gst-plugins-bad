@@ -35,6 +35,7 @@ enum
   PROP_LATENCY,
   PROP_PASSPHRASE,
   PROP_KEY_LENGTH,
+  PROP_SNDBUF_SIZE,
 
   /*< private > */
   PROP_LAST
@@ -78,6 +79,9 @@ gst_srt_base_sink_get_property (GObject * object,
     case PROP_KEY_LENGTH:
       g_value_set_int (value, self->key_length);
       break;
+    case PROP_SNDBUF_SIZE:
+      g_value_set_int (value, self->sndbuf_size);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -110,6 +114,9 @@ gst_srt_base_sink_set_property (GObject * object,
       self->key_length = key_length;
       break;
     }
+    case PROP_SNDBUF_SIZE:
+      self->sndbuf_size = g_value_get_int (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -244,6 +251,12 @@ gst_srt_base_sink_class_init (GstSRTBaseSinkClass * klass)
       "Crypto key length in bytes{16,24,32}", 16,
       32, SRT_DEFAULT_KEY_LENGTH, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+  properties[PROP_SNDBUF_SIZE] =
+      g_param_spec_int ("send-buffer-size", "send buffer size",
+      "SRT send buffer size in srt packet unit (1500 - 28 bytes)",
+      SRT_MIN_BUFFER_SIZE, SRT_MAX_BUFFER_SIZE, SRT_DEFAULT_BUFFER_SIZE,
+      GST_PARAM_MUTABLE_READY | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
   gstbasesink_class->render = GST_DEBUG_FUNCPTR (gst_srt_base_sink_render);
@@ -256,6 +269,7 @@ gst_srt_base_sink_init (GstSRTBaseSink * self)
   self->latency = SRT_DEFAULT_LATENCY;
   self->passphrase = NULL;
   self->key_length = SRT_DEFAULT_KEY_LENGTH;
+  self->sndbuf_size = SRT_DEFAULT_BUFFER_SIZE;
 
 #ifndef GST_DISABLE_GST_DEBUG
   gst_srt_debug_init ();

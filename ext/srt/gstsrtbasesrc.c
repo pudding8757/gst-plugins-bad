@@ -40,6 +40,7 @@ enum
   PROP_LATENCY,
   PROP_PASSPHRASE,
   PROP_KEY_LENGTH,
+  PROP_RCVBUF_SIZE,
 
   /*< private > */
   PROP_LAST
@@ -87,6 +88,9 @@ gst_srt_base_src_get_property (GObject * object,
     case PROP_KEY_LENGTH:
       g_value_set_int (value, self->key_length);
       break;
+    case PROP_RCVBUF_SIZE:
+      g_value_set_int (value, self->rcvbuf_size);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -125,6 +129,9 @@ gst_srt_base_src_set_property (GObject * object,
       self->key_length = key_length;
       break;
     }
+    case PROP_RCVBUF_SIZE:
+      self->rcvbuf_size = g_value_get_int (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -358,6 +365,12 @@ gst_srt_base_src_class_init (GstSRTBaseSrcClass * klass)
       "Crypto key length in bytes{16,24,32}", 16,
       32, SRT_DEFAULT_KEY_LENGTH, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+  properties[PROP_RCVBUF_SIZE] =
+      g_param_spec_int ("receive-buffer-size", "receive buffer size",
+      "SRT receive buffer size in srt packet unit (1500 - 28 bytes)",
+      SRT_MIN_BUFFER_SIZE, SRT_MAX_BUFFER_SIZE, SRT_DEFAULT_BUFFER_SIZE,
+      GST_PARAM_MUTABLE_READY | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
   g_object_class_install_properties (gobject_class, PROP_LAST, properties);
 
   gst_element_class_add_static_pad_template (gstelement_class, &src_template);
@@ -386,6 +399,7 @@ gst_srt_base_src_init (GstSRTBaseSrc * self)
 
   self->latency = SRT_DEFAULT_LATENCY;
   self->key_length = SRT_DEFAULT_KEY_LENGTH;
+  self->rcvbuf_size = SRT_DEFAULT_BUFFER_SIZE;
   self->cancellable = g_cancellable_new ();
   self->event_fd = g_cancellable_get_fd (self->cancellable);
 }

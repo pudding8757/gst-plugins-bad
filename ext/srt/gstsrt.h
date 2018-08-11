@@ -34,6 +34,16 @@
 #define SRT_DEFAULT_LATENCY 125
 #define SRT_DEFAULT_KEY_LENGTH 16
 
+/* Default SRTO_MSS (1500) - header (20 bytes IPv4 + 8 bytes of UDP) */
+#define SRT_PKT_SIZE (1500 - 28)
+/* Default send/receive buffer size (i.e., libsrt's internal queue size)
+ * https://github.com/Haivision/srt/blob/master/docs/API.md
+ */
+#define SRT_DEFAULT_BUFFER_SIZE 8192
+/* Based on SRTO_FC range */
+#define SRT_MIN_BUFFER_SIZE 32
+#define SRT_MAX_BUFFER_SIZE 25600
+
 G_BEGIN_DECLS
 
 SRTSOCKET
@@ -41,12 +51,12 @@ gst_srt_client_connect (GstElement * elem, int sender,
     const gchar * host, guint16 port, int rendez_vous,
     const gchar * bind_address, guint16 bind_port, int latency,
     GSocketAddress ** socket_address, gint * poll_id,
-    const gchar * passphrase, int key_length);
+    const gchar * passphrase, int key_length, int bufsize);
 
 SRTSOCKET
 gst_srt_server_listen (GstElement * elem, int sender,
     const gchar * host, guint16 port, gint latency, gint * poll_id,
-    const gchar * passphrase, int key_length);
+    const gchar * passphrase, int key_length, int bufsize);
 
 void
 gst_srt_debug_init (void);

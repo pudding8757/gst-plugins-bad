@@ -51,6 +51,7 @@ struct _GstSRTBaseSrc {
   gint latency;
   gchar *passphrase;
   gint key_length;
+  gint rcvbuf_size;
 
   SRTSOCKET sock;
   gint poll_id;

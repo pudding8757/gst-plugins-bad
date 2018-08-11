@@ -178,7 +178,8 @@ gst_srt_client_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
 
   *socket = gst_srt_client_connect (GST_ELEMENT (src), FALSE, host, port,
       self->rendez_vous, self->bind_address, self->bind_port, src->latency,
-      &socket_address, poll_id, src->passphrase, src->key_length);
+      &socket_address, poll_id, src->passphrase, src->key_length,
+      src->rcvbuf_size);
 
   g_clear_object (&socket_address);
 

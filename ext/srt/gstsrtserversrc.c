@@ -167,7 +167,7 @@ gst_srt_server_src_open (GstSRTBaseSrc * src, const gchar * host, guint port,
 {
   *socket = gst_srt_server_listen (GST_ELEMENT (src),
       FALSE, host, port, src->latency, poll_id, src->passphrase,
-      src->key_length);
+      src->key_length, src->rcvbuf_size);
 
   return (*socket != SRT_INVALID_SOCK);
 }

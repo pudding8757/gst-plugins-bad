@@ -153,7 +153,8 @@ gst_srt_client_sink_start (GstBaseSink * sink)
   handle->sock = gst_srt_client_connect (GST_ELEMENT (sink), TRUE,
       gst_uri_get_host (uri), gst_uri_get_port (uri), self->rendez_vous,
       self->bind_address, self->bind_port, base->latency,
-      &handle->sockaddr, &self->poll_id, base->passphrase, base->key_length);
+      &handle->sockaddr, &self->poll_id, base->passphrase, base->key_length,
+      base->sndbuf_size);
 
   g_clear_pointer (&uri, gst_uri_unref);
 

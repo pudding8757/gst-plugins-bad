@@ -87,13 +87,14 @@ gst_srt_client_connect (GstElement * elem, int sender,
     const gchar * host, guint16 port, int rendez_vous,
     const gchar * bind_address, guint16 bind_port, int latency,
     GSocketAddress ** socket_address, gint * poll_id, const gchar * passphrase,
-    int key_length)
+    int key_length, int bufsize)
 {
   SRTSOCKET sock = SRT_INVALID_SOCK;
   GError *error = NULL;
   gpointer sa;
   size_t sa_len;
   int poll_event = SRT_EPOLL_ERR;
+  int scaled_bufsize = bufsize * SRT_PKT_SIZE;
 
   poll_event |= sender ? SRT_EPOLL_OUT : SRT_EPOLL_IN;
 
@@ -152,6 +153,20 @@ gst_srt_client_connect (GstElement * elem, int sender,
     GST_WARNING_OBJECT (elem,
         "failed to set SRTO_RENDEZVOUS option (reason: %s)",
         srt_getlasterror_str ());
+  }
+
+  if (sender) {
+    if (srt_setsockopt (sock, 0, SRTO_SNDBUF, &scaled_bufsize,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem, "failed to set SRTO_SNDBUF option (reason: %s)",
+          srt_getlasterror_str ());
+    }
+  } else {
+    if (srt_setsockopt (sock, 0, SRTO_RCVBUF, &scaled_bufsize,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem, "failed to set SRTO_RCVBUF option (reason: %s)",
+          srt_getlasterror_str ());
+    }
   }
 
   if (passphrase != NULL && passphrase[0] != '\0') {
@@ -251,13 +266,14 @@ failed:
 SRTSOCKET
 gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
     guint16 port, int latency, gint * poll_id, const gchar * passphrase,
-    int key_length)
+    int key_length, int bufsize)
 {
   SRTSOCKET sock = SRT_INVALID_SOCK;
   GError *error = NULL;
   struct sockaddr sa;
   size_t sa_len;
   GSocketAddress *addr = NULL;
+  int scaled_bufsize = bufsize * SRT_PKT_SIZE;
 
   addr = gst_srt_socket_address_new (elem, host, port);
 
@@ -314,6 +330,20 @@ gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
     GST_WARNING_OBJECT (elem,
         "failed to set SRTO_TSBPDDELAY option (reason: %s)",
         srt_getlasterror_str ());
+  }
+
+  if (sender) {
+    if (srt_setsockopt (sock, 0, SRTO_SNDBUF, &scaled_bufsize,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem, "failed to set SRTO_SNDBUF option (reason: %s)",
+          srt_getlasterror_str ());
+    }
+  } else {
+    if (srt_setsockopt (sock, 0, SRTO_RCVBUF, &scaled_bufsize,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem, "failed to set SRTO_RCVBUF option (reason: %s)",
+          srt_getlasterror_str ());
+    }
   }
 
   if (passphrase != NULL && passphrase[0] != '\0') {

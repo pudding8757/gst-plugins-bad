@@ -433,7 +433,8 @@ gst_srt_server_sink_start (GstBaseSink * sink)
 
   self->sock = gst_srt_server_listen (GST_ELEMENT (self),
       TRUE, host, gst_uri_get_port (uri),
-      base->latency, &self->poll_id, base->passphrase, base->key_length);
+      base->latency, &self->poll_id, base->passphrase, base->key_length,
+      base->sndbuf_size);
 
   g_clear_pointer (&uri, gst_uri_unref);
 

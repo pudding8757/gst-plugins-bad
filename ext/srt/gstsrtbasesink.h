@@ -72,6 +72,7 @@ struct _GstSRTBaseSink {
   gint latency;
   gchar *passphrase;
   gint key_length;
+  gint sndbuf_size;
 
   /*< private >*/
   gpointer _gst_reserved[GST_PADDING];

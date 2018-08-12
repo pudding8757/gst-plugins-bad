@@ -508,12 +508,27 @@ gst_srt_base_sink_client_send_message (GstSRTBaseSink * sink,
 {
   GstBuffer *head;
   GstMapInfo info;
+  gint32 snddata;
+  int dummy;
 
   g_return_val_if_fail (handle != NULL, GST_FLOW_ERROR);
 
   if (!handle->queue) {
     GST_DEBUG_OBJECT (sink, "Client queue is empty");
     return GST_FLOW_OK;
+  }
+
+  srt_getsockopt (handle->sock, 0, SRTO_SNDDATA, &snddata, &dummy);
+
+  GST_LOG_OBJECT (sink, "Num unacknowledged packet %" G_GINT32_FORMAT "/%"
+      G_GINT32_FORMAT, snddata, sink->sndbuf_size);
+
+  if (sink->sndbuf_size - 2 <= snddata) {
+    handle->retry_count++;
+    GST_DEBUG_OBJECT (sink,
+        "Send message would block, retry count %" G_GUINT32_FORMAT,
+        handle->retry_count);
+    return GST_SRT_FLOW_SEND_AGAIN;
   }
 
   head = GST_BUFFER (handle->queue->data);
@@ -530,7 +545,9 @@ gst_srt_base_sink_client_send_message (GstSRTBaseSink * sink,
     GstFlowReturn ret;
 
     if (err == SRT_EASYNCSND) {
-      GST_DEBUG_OBJECT (sink, "EAGAIN, need to send again");
+      handle->retry_count++;
+      GST_DEBUG_OBJECT (sink, "EAGAIN, need to send again, retry count %"
+          G_GUINT32_FORMAT, handle->retry_count);
       ret = GST_SRT_FLOW_SEND_AGAIN;
     } else {
       GST_ERROR_OBJECT (sink,
@@ -541,6 +558,8 @@ gst_srt_base_sink_client_send_message (GstSRTBaseSink * sink,
 
     return ret;
   }
+
+  handle->retry_count = 0;
 
   gst_buffer_unmap (head, &info);
   handle->queue = g_slist_remove (handle->queue, head);

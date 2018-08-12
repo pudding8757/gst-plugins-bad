@@ -63,6 +63,7 @@ struct _GstSRTClientHandle {
   gint ref_count;
 
   GstSRTClientState state;
+  guint32 retry_count;
 };
 
 struct _GstSRTBaseSink {

@@ -128,18 +128,45 @@ gst_srt_client_connect (GstElement * elem, int sender,
   }
 
   /* Make sure TSBPD mode is enable (SRT mode) */
-  srt_setsockopt (sock, 0, SRTO_TSBPDMODE, &(int) {
-      1}, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_TSBPDMODE, &(int) {
+          1}, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem,
+        "failed to set SRTO_TSBPDMODE option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
-  srt_setsockopt (sock, 0, SRTO_SENDER, &sender, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_SENDER, &sender, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem, "failed to set SRTO_SENDER option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
-  srt_setsockopt (sock, 0, SRTO_TSBPDDELAY, &latency, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_TSBPDDELAY, &latency,
+          sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem,
+        "failed to set SRTO_TSBPDDELAY option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
-  srt_setsockopt (sock, 0, SRTO_RENDEZVOUS, &rendez_vous, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_RENDEZVOUS, &rendez_vous,
+          sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem,
+        "failed to set SRTO_RENDEZVOUS option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
   if (passphrase != NULL && passphrase[0] != '\0') {
-    srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase, strlen (passphrase));
-    srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &key_length, sizeof (int));
+    if (srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase,
+            strlen (passphrase)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem,
+          "failed to set SRTO_PASSPHRASE option (reason: %s)",
+          srt_getlasterror_str ());
+    }
+    if (srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &key_length,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem,
+          "failed to set SRTO_PBKEYLEN option (reason: %s)",
+          srt_getlasterror_str ());
+    }
   }
 
   if (bind_address || bind_port || rendez_vous) {
@@ -189,7 +216,12 @@ gst_srt_client_connect (GstElement * elem, int sender,
     goto failed;
   }
 
-  srt_epoll_add_usock (*poll_id, sock, &poll_event);
+  if (srt_epoll_add_usock (*poll_id, sock, &poll_event) == SRT_ERROR) {
+    GST_ELEMENT_ERROR (elem, LIBRARY, INIT, (NULL),
+        ("failed to add socket to epoll (reason: %s)",
+            srt_getlasterror_str ()));
+    goto failed;
+  }
 
   if (srt_connect (sock, sa, sa_len) == SRT_ERROR) {
     GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Connection error"),
@@ -251,23 +283,52 @@ gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
 
   /* Make SRT server socket non-blocking */
   /* for non-blocking srt_close() */
-  srt_setsockopt (sock, 0, SRTO_SNDSYN, &(int) {
-      0}, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_SNDSYN, &(int) {
+          0}, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem, "failed to set SRTO_SNDSYN option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
   /* for non-blocking srt_accept() */
-  srt_setsockopt (sock, 0, SRTO_RCVSYN, &(int) {
-      0}, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_RCVSYN, &(int) {
+          0}, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem, "failed to set SRTO_RCVSYN option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
   /* Make sure TSBPD mode is enable (SRT mode) */
-  srt_setsockopt (sock, 0, SRTO_TSBPDMODE, &(int) {
-      1}, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_TSBPDMODE, &(int) {
+          1}, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem,
+        "failed to set SRTO_TSBPDMODE option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
-  srt_setsockopt (sock, 0, SRTO_SENDER, &sender, sizeof (int));
-  srt_setsockopt (sock, 0, SRTO_TSBPDDELAY, &latency, sizeof (int));
+  if (srt_setsockopt (sock, 0, SRTO_SENDER, &sender, sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem, "failed to set SRTO_SENDER option (reason: %s)",
+        srt_getlasterror_str ());
+  }
+
+  if (srt_setsockopt (sock, 0, SRTO_TSBPDDELAY, &latency,
+          sizeof (int)) == SRT_ERROR) {
+    GST_WARNING_OBJECT (elem,
+        "failed to set SRTO_TSBPDDELAY option (reason: %s)",
+        srt_getlasterror_str ());
+  }
 
   if (passphrase != NULL && passphrase[0] != '\0') {
-    srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase, strlen (passphrase));
-    srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &key_length, sizeof (int));
+    if (srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase,
+            strlen (passphrase)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem,
+          "failed to set SRTO_PASSPHRASE option (reason: %s)",
+          srt_getlasterror_str ());
+    }
+    if (srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &key_length,
+            sizeof (int)) == SRT_ERROR) {
+      GST_WARNING_OBJECT (elem,
+          "failed to set SRTO_PBKEYLEN option (reason: %s)",
+          srt_getlasterror_str ());
+    }
   }
 
   *poll_id = srt_epoll_create ();
@@ -278,8 +339,13 @@ gst_srt_server_listen (GstElement * elem, int sender, const gchar * host,
     goto failed;
   }
 
-  srt_epoll_add_usock (*poll_id, sock, &(int) {
-      SRT_EPOLL_IN | SRT_EPOLL_ERR});
+  if (srt_epoll_add_usock (*poll_id, sock, &(int) {
+          SRT_EPOLL_IN | SRT_EPOLL_ERR}) == SRT_ERROR) {
+    GST_ELEMENT_ERROR (elem, LIBRARY, INIT, (NULL),
+        ("failed to add listen socket to epoll (reason: %s)",
+            srt_getlasterror_str ()));
+    goto failed;
+  }
 
   if (srt_bind (sock, &sa, sa_len) == SRT_ERROR) {
     GST_WARNING_OBJECT (elem, "failed to bind SRT server socket (reason: %s)",

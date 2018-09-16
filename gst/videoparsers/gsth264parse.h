@@ -32,8 +32,6 @@
 
 G_BEGIN_DECLS
 
-typedef struct _H264Params H264Params;
-
 #define GST_TYPE_H264_PARSE \
   (gst_h264_parse_get_type())
 #define GST_H264_PARSE(obj) \
@@ -107,8 +105,6 @@ struct _GstH264Parse
   gboolean discont;
 
   /* frame parsing */
-  /*guint last_nal_pos;*/
-  /*guint next_sc_pos;*/
   gint idr_pos, sei_pos;
   gboolean update_caps;
   GstAdapter *frame_out;

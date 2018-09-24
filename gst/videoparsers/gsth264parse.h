@@ -29,6 +29,7 @@
 #include <gst/base/gstbaseparse.h>
 #include <gst/codecparsers/gsth264parser.h>
 #include <gst/video/video.h>
+#include "gsth26xbaseparse.h"
 
 G_BEGIN_DECLS
 
@@ -47,176 +48,27 @@ G_BEGIN_DECLS
 
 GType gst_h264_parse_get_type (void);
 
-typedef struct _GstH264ParseSPSInfo GstH264ParseSPSInfo;
-typedef struct _GstH264ParseProfileTierLevel GstH264ParseProfileTierLevel;
 typedef struct _GstH264Parse GstH264Parse;
 typedef struct _GstH264ParseClass GstH264ParseClass;
 
-typedef enum
-{
-  GST_H264_PARSE_HANDLE_FRAME_OK,
-  GST_H264_PARSE_HANDLE_FRAME_MORE,
-  GST_H264_PARSE_HANDLE_FRAME_DROP,
-  GST_H264_PARSE_HANDLE_FRAME_SKIP,
-  GST_H264_PARSE_HANDLE_FRAME_INVALID_STREAM
-} GstH264ParseHandleFrameReturn;
-
-struct _GstH264ParseSPSInfo
-{
-  guint width;
-  guint height;
-  gint fps_num;
-  gint fps_den;
-  gint par_num;
-  gint par_den;
-  GstVideoInterlaceMode interlace_mode;
-  const gchar * chroma_format;
-  guint bit_depth_luma;
-  guint bit_depth_chroma;
-};
-
-struct _GstH264ParseProfileTierLevel
-{
-  const gchar * profile;
-  const gchar * tier;
-  const gchar * level;
-};
 
 struct _GstH264Parse
 {
-  GstBaseParse baseparse;
-
-  /* stream */
-  gint width, height;
-  gint fps_num, fps_den;
-  gint upstream_par_n, upstream_par_d;
-  gint parsed_par_n, parsed_par_d;
-  /* current codec_data in output caps, if any */
-  GstBuffer *codec_data;
-  /* input codec_data, if any */
-  GstBuffer *codec_data_in;
-  guint nal_length_size;
-  gboolean packetized;
-  gboolean split_packetized;
-  gboolean transform;
+  GstH26XBaseParse baseparse;
 
   /* state */
   GstH264NalParser *nalparser;
-  guint state;
-  guint in_align;
-  guint align;
-  guint format;
-  gint current_off;
-  /* True if input format and alignment match negotiated output */
-  gboolean can_passthrough;
-
-  GstClockTime last_report;
-  gboolean push_codec;
-  /* The following variables have a meaning in context of "have
-   * SPS/PPS to push downstream", e.g. to update caps */
-  gboolean have_sps;
-  gboolean have_pps;
-
-  gboolean sent_codec_tag;
-
-  /* collected SPS and PPS NALUs */
-  GstBuffer *sps_nals[GST_H264_MAX_SPS_COUNT];
-  GstBuffer *pps_nals[GST_H264_MAX_PPS_COUNT];
 
   /* Infos we need to keep track of */
   guint32 sei_cpb_removal_delay;
   guint8 sei_pic_struct;
   guint8 sei_pic_struct_pres_flag;
   guint field_pic_flag;
-
-  /* cached timestamps */
-  /* (trying to) track upstream dts and interpolate */
-  GstClockTime dts;
-  /* dts at start of last buffering period */
-  GstClockTime ts_trn_nb;
-  gboolean do_ts;
-
-  gboolean discont;
-
-  /* frame parsing */
-  gint idr_pos, sei_pos;
-  gboolean update_caps;
-  GstAdapter *frame_out;
-  gboolean keyframe;
-  gboolean header;
-  gboolean frame_start;
-  /* AU state */
-  gboolean picture_start;
-
-  /* props */
-  gint interval;
-
-  GstClockTime pending_key_unit_ts;
-  GstEvent *force_key_unit_event;
-
-  /* Stereo / multiview info */
-  GstVideoMultiviewMode multiview_mode;
-  GstVideoMultiviewFlags multiview_flags;
-  gboolean first_in_bundle;
-
-  /* For insertion of AU Delimiter */
-  gboolean aud_needed;
-  gboolean aud_insert;
 };
 
 struct _GstH264ParseClass
 {
-  GstBaseParseClass parent_class;
-
-  const gchar * (*format_to_string)   (GstH264Parse * parse,
-                                       guint format);
-
-  guint         (*format_from_string) (GstH264Parse * parse,
-                                       const gchar * format);
-
-  GstCaps *     (*get_default_caps)   (GstH264Parse * parse);
-
-  gboolean      (*fixate_format)      (GstH264Parse * parse,
-                                       guint * format,
-                                       guint * align,
-                                       const GValue *codec_data_value);
-
-  gboolean      (*handle_codec_data)  (GstH264Parse * parse,
-                                       GstMapInfo * map);
-
-  void          (*get_timestamp)      (GstH264Parse * parse,
-                                       GstClockTime * ts,
-                                       GstClockTime * dur);
-
-  gboolean      (*has_last_sps)       (GstH264Parse * parse);
-
-  gboolean      (*fill_sps_info)      (GstH264Parse * parse,
-                                       GstH264ParseSPSInfo * info);
-
-  gboolean      (*fill_profile_tier_level) (GstH264Parse * parse,
-                                            GstH264ParseProfileTierLevel *ptl);
-
-  GstCaps *     (*get_compatible_profile_caps_from_last_sps)  (GstH264Parse * parse);
-
-  GstBuffer *   (*prepare_pre_push_frame)   (GstH264Parse * parse,
-                                             GstBaseParseFrame * frame);
-
-  GstBuffer *   (*make_codec_data)          (GstH264Parse * parse);
-
-  GstFlowReturn (*handle_frame_packetized)  (GstH264Parse * parse,
-                                             GstBaseParseFrame * frame);
-
-  GstH264ParseHandleFrameReturn   (*handle_frame_check_initial_skip)  (GstH264Parse * parse,
-                                                                       gint * skipsize,
-                                                                       gint * dropsize,
-                                                                       GstMapInfo * map);
-
-  GstH264ParseHandleFrameReturn   (*handle_frame_bytestream)          (GstH264Parse * parse,
-                                                                       gint * skipsize,
-                                                                       gint * framesize,
-                                                                       gint * current_off,
-                                                                       GstMapInfo * map,
-                                                                       gboolean drain);
+  GstH26XBaseParseClass parent_class;
 };
 
 G_END_DECLS

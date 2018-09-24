@@ -172,7 +172,8 @@ struct _GstH264ParseClass
                                        GstH264ParseProfileTierLevel *ptl);
   GstCaps * (*get_compatible_profile_caps_from_last_sps)
                                       (GstH264Parse * parse);
-
+  GstBuffer * (*prepare_pre_push_frame) (GstH264Parse * parse,
+                                         GstBaseParseFrame * frame);
 };
 
 G_END_DECLS

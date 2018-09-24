@@ -128,6 +128,8 @@ static gboolean gst_h264_parse_fill_profile_tier_level (GstH264Parse * parse,
 static GstCaps
     * gst_h264_parse_get_compatible_profile_caps_from_last_sps (GstH264Parse *
     parse);
+static GstBuffer *gst_h264_parse_prepare_pre_push_frame (GstH264Parse * parse,
+    GstBaseParseFrame * frame);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -173,6 +175,8 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   klass->get_compatible_profile_caps_from_last_sps =
       GST_DEBUG_FUNCPTR
       (gst_h264_parse_get_compatible_profile_caps_from_last_sps);
+  klass->prepare_pre_push_frame =
+      GST_DEBUG_FUNCPTR (gst_h264_parse_prepare_pre_push_frame);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -2508,14 +2512,52 @@ gst_h264_parse_handle_sps_pps_nals (GstH264Parse * h264parse,
   return send_done;
 }
 
+static GstBuffer *
+gst_h264_parse_prepare_pre_push_frame (GstH264Parse * parse,
+    GstBaseParseFrame * frame)
+{
+  GstBuffer *buffer;
+
+  /* In case of byte-stream, insert au delimeter by default
+   * if it doesn't exist */
+  if (parse->aud_insert && parse->format == GST_H264_PARSE_FORMAT_BYTE) {
+    if (parse->align == GST_H264_PARSE_ALIGN_AU) {
+      GstMemory *mem =
+          gst_memory_new_wrapped (GST_MEMORY_FLAG_READONLY, (guint8 *) au_delim,
+          sizeof (au_delim), 0, sizeof (au_delim), NULL, NULL);
+
+      frame->out_buffer = gst_buffer_copy (frame->buffer);
+      gst_buffer_prepend_memory (frame->out_buffer, mem);
+      if (parse->idr_pos >= 0)
+        parse->idr_pos += sizeof (au_delim);
+
+      buffer = frame->out_buffer;
+    } else {
+      GstBuffer *aud_buffer = gst_buffer_new_allocate (NULL, 2, NULL);
+      gst_buffer_fill (aud_buffer, 0, (guint8 *) (au_delim + 4), 2);
+
+      buffer = frame->buffer;
+      gst_h264_parse_push_codec_buffer (parse, aud_buffer,
+          GST_BUFFER_TIMESTAMP (buffer));
+      gst_buffer_unref (aud_buffer);
+    }
+  } else {
+    buffer = frame->buffer;
+  }
+
+  return buffer;
+}
+
 static GstFlowReturn
 gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 {
   GstH264Parse *h264parse;
   GstBuffer *buffer;
   GstEvent *event;
+  GstH264ParseClass *klass;
 
   h264parse = GST_H264_PARSE (parse);
+  klass = GST_H264_PARSE_GET_CLASS (h264parse);
 
   if (!h264parse->sent_codec_tag) {
     GstTagList *taglist;
@@ -2545,32 +2587,10 @@ gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
     h264parse->sent_codec_tag = TRUE;
   }
 
-  /* In case of byte-stream, insert au delimeter by default
-   * if it doesn't exist */
-  if (h264parse->aud_insert && h264parse->format == GST_H264_PARSE_FORMAT_BYTE) {
-    if (h264parse->align == GST_H264_PARSE_ALIGN_AU) {
-      GstMemory *mem =
-          gst_memory_new_wrapped (GST_MEMORY_FLAG_READONLY, (guint8 *) au_delim,
-          sizeof (au_delim), 0, sizeof (au_delim), NULL, NULL);
-
-      frame->out_buffer = gst_buffer_copy (frame->buffer);
-      gst_buffer_prepend_memory (frame->out_buffer, mem);
-      if (h264parse->idr_pos >= 0)
-        h264parse->idr_pos += sizeof (au_delim);
-
-      buffer = frame->out_buffer;
-    } else {
-      GstBuffer *aud_buffer = gst_buffer_new_allocate (NULL, 2, NULL);
-      gst_buffer_fill (aud_buffer, 0, (guint8 *) (au_delim + 4), 2);
-
-      buffer = frame->buffer;
-      gst_h264_parse_push_codec_buffer (h264parse, aud_buffer,
-          GST_BUFFER_TIMESTAMP (buffer));
-      gst_buffer_unref (aud_buffer);
-    }
-  } else {
+  if (klass->prepare_pre_push_frame)
+    buffer = klass->prepare_pre_push_frame (h264parse, frame);
+  else
     buffer = frame->buffer;
-  }
 
   if ((event = check_pending_key_unit_event (h264parse->force_key_unit_event,
               &parse->segment, GST_BUFFER_TIMESTAMP (buffer),

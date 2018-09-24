@@ -115,6 +115,11 @@ static gboolean gst_h264_parse_src_event (GstBaseParse * parse,
 static void gst_h264_parse_update_src_caps (GstH264Parse * h264parse,
     GstCaps * caps);
 
+static const gchar *gst_h264_parse_format_to_string (GstH264Parse * parse,
+    guint format);
+static guint gst_h264_parse_format_from_string (GstH264Parse * parse,
+    const gchar * format);
+
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
 {
@@ -147,6 +152,10 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   parse_class->get_sink_caps = GST_DEBUG_FUNCPTR (gst_h264_parse_get_caps);
   parse_class->sink_event = GST_DEBUG_FUNCPTR (gst_h264_parse_event);
   parse_class->src_event = GST_DEBUG_FUNCPTR (gst_h264_parse_src_event);
+
+  klass->format_to_string = GST_DEBUG_FUNCPTR (gst_h264_parse_format_to_string);
+  klass->format_from_string =
+      GST_DEBUG_FUNCPTR (gst_h264_parse_format_from_string);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -293,19 +302,27 @@ gst_h264_parse_stop (GstBaseParse * parse)
 }
 
 static const gchar *
+gst_h264_parse_format_to_string (GstH264Parse * parse, guint format)
+{
+  switch (format) {
+    case GST_H264_PARSE_FORMAT_AVC:
+      return "avc";
+    case GST_H264_PARSE_FORMAT_BYTE:
+      return "byte-stream";
+    case GST_H264_PARSE_FORMAT_AVC3:
+      return "avc3";
+    default:
+      return "none";
+  }
+}
+
+static const gchar *
 gst_h264_parse_get_string (GstH264Parse * parse, gboolean format, gint code)
 {
+  GstH264ParseClass *klass = GST_H264_PARSE_GET_CLASS (parse);
+
   if (format) {
-    switch (code) {
-      case GST_H264_PARSE_FORMAT_AVC:
-        return "avc";
-      case GST_H264_PARSE_FORMAT_BYTE:
-        return "byte-stream";
-      case GST_H264_PARSE_FORMAT_AVC3:
-        return "avc3";
-      default:
-        return "none";
-    }
+    return klass->format_to_string (parse, code);
   } else {
     switch (code) {
       case GST_H264_PARSE_ALIGN_NAL:
@@ -318,9 +335,29 @@ gst_h264_parse_get_string (GstH264Parse * parse, gboolean format, gint code)
   }
 }
 
-static void
-gst_h264_parse_format_from_caps (GstCaps * caps, guint * format, guint * align)
+static guint
+gst_h264_parse_format_from_string (GstH264Parse * parse, const gchar * format)
 {
+  guint ret = GST_H264_PARSE_FORMAT_NONE;
+
+  g_return_val_if_fail (format, GST_H264_PARSE_FORMAT_NONE);
+
+  if (g_strcmp0 (format, "avc") == 0)
+    ret = GST_H264_PARSE_FORMAT_AVC;
+  else if (g_strcmp0 (format, "byte-stream") == 0)
+    ret = GST_H264_PARSE_FORMAT_BYTE;
+  else if (g_strcmp0 (format, "avc3") == 0)
+    ret = GST_H264_PARSE_FORMAT_AVC3;
+
+  return ret;
+}
+
+static void
+gst_h264_parse_format_from_caps (GstH264Parse * parse,
+    GstCaps * caps, guint * format, guint * align)
+{
+  GstH264ParseClass *klass = GST_H264_PARSE_GET_CLASS (parse);
+
   if (format)
     *format = GST_H264_PARSE_FORMAT_NONE;
 
@@ -337,12 +374,7 @@ gst_h264_parse_format_from_caps (GstCaps * caps, guint * format, guint * align)
 
     if (format) {
       if ((str = gst_structure_get_string (s, "stream-format"))) {
-        if (strcmp (str, "avc") == 0)
-          *format = GST_H264_PARSE_FORMAT_AVC;
-        else if (strcmp (str, "byte-stream") == 0)
-          *format = GST_H264_PARSE_FORMAT_BYTE;
-        else if (strcmp (str, "avc3") == 0)
-          *format = GST_H264_PARSE_FORMAT_AVC3;
+        *format = klass->format_from_string (parse, str);
       }
     }
 
@@ -384,7 +416,7 @@ gst_h264_parse_negotiate (GstH264Parse * h264parse, gint in_format,
   if (in_caps && caps) {
     if (gst_caps_can_intersect (in_caps, caps)) {
       GST_DEBUG_OBJECT (h264parse, "downstream accepts upstream caps");
-      gst_h264_parse_format_from_caps (in_caps, &format, &align);
+      gst_h264_parse_format_from_caps (h264parse, in_caps, &format, &align);
       gst_caps_unref (caps);
       caps = NULL;
       h264parse->can_passthrough = TRUE;
@@ -395,7 +427,7 @@ gst_h264_parse_negotiate (GstH264Parse * h264parse, gint in_format,
   if (caps && !gst_caps_is_empty (caps)) {
     /* fixate to avoid ambiguity with lists when parsing */
     caps = gst_caps_fixate (caps);
-    gst_h264_parse_format_from_caps (caps, &format, &align);
+    gst_h264_parse_format_from_caps (h264parse, caps, &format, &align);
   }
 
   /* default */
@@ -2581,7 +2613,7 @@ gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
       &h264parse->upstream_par_n, &h264parse->upstream_par_d);
 
   /* get upstream format and align from caps */
-  gst_h264_parse_format_from_caps (caps, &format, &align);
+  gst_h264_parse_format_from_caps (h264parse, caps, &format, &align);
 
   codec_data_value = gst_structure_get_value (str, "codec_data");
 

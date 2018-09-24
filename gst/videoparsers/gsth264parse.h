@@ -38,6 +38,8 @@ G_BEGIN_DECLS
   (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_H264_PARSE,GstH264Parse))
 #define GST_H264_PARSE_CLASS(klass) \
   (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_H264_PARSE,GstH264ParseClass))
+#define GST_H264_PARSE_GET_CLASS(obj) \
+  (G_TYPE_INSTANCE_GET_CLASS((obj),GST_TYPE_H264_PARSE,GstH264ParseClass))
 #define GST_IS_H264_PARSE(obj) \
   (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_H264_PARSE))
 #define GST_IS_H264_PARSE_CLASS(klass) \
@@ -133,6 +135,11 @@ struct _GstH264Parse
 struct _GstH264ParseClass
 {
   GstBaseParseClass parent_class;
+
+  const gchar * (*format_to_string)   (GstH264Parse * parse,
+                                       guint format);
+  guint         (*format_from_string) (GstH264Parse * parse,
+                                       const gchar * format);
 };
 
 G_END_DECLS

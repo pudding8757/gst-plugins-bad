@@ -52,6 +52,15 @@ typedef struct _GstH264ParseProfileTierLevel GstH264ParseProfileTierLevel;
 typedef struct _GstH264Parse GstH264Parse;
 typedef struct _GstH264ParseClass GstH264ParseClass;
 
+typedef enum
+{
+  GST_H264_PARSE_HANDLE_FRAME_OK,
+  GST_H264_PARSE_HANDLE_FRAME_MORE,
+  GST_H264_PARSE_HANDLE_FRAME_DROP,
+  GST_H264_PARSE_HANDLE_FRAME_SKIP,
+  GST_H264_PARSE_HANDLE_FRAME_INVALID_STREAM
+} GstH264ParseHandleFrameReturn;
+
 struct _GstH264ParseSPSInfo
 {
   guint width;
@@ -177,6 +186,18 @@ struct _GstH264ParseClass
   GstBuffer * (*make_codec_data)      (GstH264Parse * parse);
   GstFlowReturn (*handle_frame_packetized)  (GstH264Parse * parse,
                                              GstBaseParseFrame * frame);
+  GstH264ParseHandleFrameReturn (*handle_frame_check_initial_skip)
+                                            (GstH264Parse * parse,
+                                             gint * skipsize,
+                                             gint * dropsize,
+                                             GstMapInfo * map);
+  GstH264ParseHandleFrameReturn (*handle_frame_bytestream)
+                                            (GstH264Parse * parse,
+                                             gint * skipsize,
+                                             gint * framesize,
+                                             gint * current_off,
+                                             GstMapInfo * map,
+                                             gboolean drain);
 };
 
 G_END_DECLS

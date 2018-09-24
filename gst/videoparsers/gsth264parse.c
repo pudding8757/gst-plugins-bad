@@ -119,6 +119,7 @@ static const gchar *gst_h264_parse_format_to_string (GstH264Parse * parse,
     guint format);
 static guint gst_h264_parse_format_from_string (GstH264Parse * parse,
     const gchar * format);
+static GstCaps *gst_h264_parse_get_default_caps (GstH264Parse * parse);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -156,6 +157,7 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   klass->format_to_string = GST_DEBUG_FUNCPTR (gst_h264_parse_format_to_string);
   klass->format_from_string =
       GST_DEBUG_FUNCPTR (gst_h264_parse_format_from_string);
+  klass->get_default_caps = GST_DEBUG_FUNCPTR (gst_h264_parse_get_default_caps);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -387,6 +389,12 @@ gst_h264_parse_format_from_caps (GstH264Parse * parse,
       }
     }
   }
+}
+
+static GstCaps *
+gst_h264_parse_get_default_caps (GstH264Parse * parse)
+{
+  return gst_caps_new_empty_simple ("video/x-h264");
 }
 
 /* check downstream caps to configure format and alignment */
@@ -1584,10 +1592,11 @@ static void
 ensure_caps_profile (GstH264Parse * h264parse, GstCaps * caps, GstH264SPS * sps)
 {
   GstCaps *peer_caps, *compat_caps;
+  GstH264ParseClass *klass = GST_H264_PARSE_GET_CLASS (h264parse);
 
   peer_caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (h264parse));
   if (!peer_caps || !gst_caps_can_intersect (caps, peer_caps)) {
-    GstCaps *filter_caps = gst_caps_new_empty_simple ("video/x-h264");
+    GstCaps *filter_caps = klass->get_default_caps (h264parse);
 
     if (peer_caps)
       gst_caps_unref (peer_caps);
@@ -1767,12 +1776,15 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
   gboolean modified = FALSE;
   GstBuffer *buf = NULL;
   GstStructure *s = NULL;
+  GstH264ParseClass *klass;
 
   if (G_UNLIKELY (!gst_pad_has_current_caps (GST_BASE_PARSE_SRC_PAD
               (h264parse))))
     modified = TRUE;
   else if (G_UNLIKELY (!h264parse->update_caps))
     return;
+
+  klass = GST_H264_PARSE_GET_CLASS (h264parse);
 
   /* if this is being called from the first _setcaps call, caps on the sinkpad
    * aren't set yet and so they need to be passed as an argument */
@@ -1783,7 +1795,7 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
 
   /* carry over input caps as much as possible; override with our own stuff */
   if (!sink_caps)
-    sink_caps = gst_caps_new_empty_simple ("video/x-h264");
+    sink_caps = klass->get_default_caps (h264parse);
   else
     s = gst_caps_get_structure (sink_caps, 0);
 
@@ -2589,8 +2601,10 @@ gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
   GstH264NalUnit nalu;
   GstH264ParserResult parseres;
   GstCaps *old_caps;
+  GstH264ParseClass *klass;
 
   h264parse = GST_H264_PARSE (parse);
+  klass = GST_H264_PARSE_GET_CLASS (h264parse);
 
   /* reset */
   h264parse->push_codec = FALSE;
@@ -2750,7 +2764,8 @@ gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
     GstCaps *in_caps;
 
     /* prefer input type determined above */
-    in_caps = gst_caps_new_simple ("video/x-h264",
+    in_caps = klass->get_default_caps (h264parse);
+    gst_caps_set_simple (in_caps,
         "parsed", G_TYPE_BOOLEAN, TRUE,
         "stream-format", G_TYPE_STRING,
         gst_h264_parse_get_string (h264parse, TRUE, format),

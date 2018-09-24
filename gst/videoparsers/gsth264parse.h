@@ -140,6 +140,7 @@ struct _GstH264ParseClass
                                        guint format);
   guint         (*format_from_string) (GstH264Parse * parse,
                                        const gchar * format);
+  GstCaps *     (*get_default_caps)   (GstH264Parse * parse);
 };
 
 G_END_DECLS

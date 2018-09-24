@@ -130,6 +130,7 @@ static GstCaps
     parse);
 static GstBuffer *gst_h264_parse_prepare_pre_push_frame (GstH264Parse * parse,
     GstBaseParseFrame * frame);
+static GstBuffer *gst_h264_parse_make_codec_data (GstH264Parse * parse);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -177,6 +178,7 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
       (gst_h264_parse_get_compatible_profile_caps_from_last_sps);
   klass->prepare_pre_push_frame =
       GST_DEBUG_FUNCPTR (gst_h264_parse_prepare_pre_push_frame);
+  klass->make_codec_data = GST_DEBUG_FUNCPTR (gst_h264_parse_make_codec_data);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -1922,7 +1924,7 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
   if ((h264parse->format == GST_H264_PARSE_FORMAT_AVC
           || h264parse->format == GST_H264_PARSE_FORMAT_AVC3)
       && h264parse->align == GST_H264_PARSE_ALIGN_AU) {
-    buf = gst_h264_parse_make_codec_data (h264parse);
+    buf = klass->make_codec_data (h264parse);
     if (buf && h264parse->codec_data) {
       GstMapInfo map;
 

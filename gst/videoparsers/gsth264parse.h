@@ -173,6 +173,12 @@ struct _GstH264ParseClass
   guint         (*format_from_string) (GstH264Parse * parse,
                                        const gchar * format);
   GstCaps *     (*get_default_caps)   (GstH264Parse * parse);
+  gboolean      (*fixate_format)      (GstH264Parse * parse,
+                                       guint * format,
+                                       guint * align,
+                                       const GValue *codec_data_value);
+  gboolean      (*handle_codec_data)  (GstH264Parse * parse,
+                                       GstMapInfo * map);
 
   gboolean      (*has_last_sps)       (GstH264Parse * parse);
   gboolean      (*fill_sps_info)      (GstH264Parse * parse,

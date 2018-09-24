@@ -141,6 +141,12 @@ static GstH264ParseHandleFrameReturn
 gst_h264_parse_handle_frame_bytestream (GstH264Parse * parse,
     gint * skipsize, gint * framesize, gint * current_offset,
     GstMapInfo * map, gboolean drain);
+static gboolean
+gst_h264_parse_fixate_format (GstH264Parse * parse, guint * format,
+    guint * align, const GValue * codec_data_value);
+static gboolean
+gst_h264_parse_handle_codec_data (GstH264Parse * parse, GstMapInfo * map);
+
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -195,6 +201,9 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
       GST_DEBUG_FUNCPTR (gst_h264_parse_handle_frame_check_initial_skip);
   klass->handle_frame_bytestream =
       GST_DEBUG_FUNCPTR (gst_h264_parse_handle_frame_bytestream);
+  klass->fixate_format = GST_DEBUG_FUNCPTR (gst_h264_parse_fixate_format);
+  klass->handle_codec_data =
+      GST_DEBUG_FUNCPTR (gst_h264_parse_handle_codec_data);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -2762,16 +2771,155 @@ gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 }
 
 static gboolean
+gst_h264_parse_fixate_format (GstH264Parse * parse, guint * format,
+    guint * align, const GValue * codec_data_value)
+{
+  if (*format == GST_H264_PARSE_FORMAT_NONE) {
+    /* codec_data implies avc */
+    if (codec_data_value != NULL) {
+      GST_ERROR ("video/x-h264 caps with codec_data but no stream-format=avc");
+      *format = GST_H264_PARSE_FORMAT_AVC;
+    } else {
+      /* otherwise assume bytestream input */
+      GST_ERROR ("video/x-h264 caps without codec_data or stream-format");
+      *format = GST_H264_PARSE_FORMAT_BYTE;
+    }
+  }
+
+  /* avc caps sanity checks */
+  if (*format == GST_H264_PARSE_FORMAT_AVC) {
+    /* AVC requires codec_data, AVC3 might have one and/or SPS/PPS inline */
+    if (codec_data_value == NULL)
+      goto avc_format_codec_data_missing;
+
+    /* AVC implies alignment=au, everything else is not allowed */
+    if (*align == GST_H264_PARSE_ALIGN_NONE)
+      *align = GST_H264_PARSE_ALIGN_AU;
+    else if (*align != GST_H264_PARSE_ALIGN_AU)
+      goto avc_format_wrong_alignment;
+  }
+
+  /* bytestream caps sanity checks */
+  if (*format == GST_H264_PARSE_FORMAT_BYTE) {
+    /* should have SPS/PSS in-band (and/or oob in streamheader field) */
+    if (codec_data_value != NULL)
+      goto bytestream_format_with_codec_data;
+  }
+
+  return TRUE;
+
+  /* ERRORS */
+avc_format_codec_data_missing:
+  {
+    GST_WARNING_OBJECT (parse, "H.264 AVC format, but no codec_data");
+    return FALSE;
+  }
+avc_format_wrong_alignment:
+  {
+    GST_WARNING_OBJECT (parse,
+        "H.264 AVC format with NAL alignment, must be AU");
+    return FALSE;
+  }
+bytestream_format_with_codec_data:
+  {
+    GST_WARNING_OBJECT (parse, "H.264 bytestream format with codec_data is not "
+        "expected, send SPS/PPS in-band with data or in streamheader field");
+    return FALSE;
+  }
+}
+
+static gboolean
+gst_h264_parse_handle_codec_data (GstH264Parse * parse, GstMapInfo * map)
+{
+  gsize size;
+  guint8 *data;
+  guint num_sps, num_pps;
+#ifndef GST_DISABLE_GST_DEBUG
+  guint profile;
+#endif
+  gint i;
+  guint off;
+  GstH264ParserResult parseres;
+  GstH264NalUnit nalu;
+
+  data = map->data;
+  size = map->size;
+
+  /* parse the avcC data */
+  if (size < 7) {               /* when numSPS==0 and numPPS==0, length is 7 bytes */
+    goto avcc_too_small;
+  }
+  /* parse the version, this must be 1 */
+  if (data[0] != 1) {
+    goto wrong_version;
+  }
+#ifndef GST_DISABLE_GST_DEBUG
+  /* AVCProfileIndication */
+  /* profile_compat */
+  /* AVCLevelIndication */
+  profile = (data[1] << 16) | (data[2] << 8) | data[3];
+  GST_DEBUG_OBJECT (parse, "profile %06x", profile);
+#endif
+
+  /* 6 bits reserved | 2 bits lengthSizeMinusOne */
+  /* this is the number of bytes in front of the NAL units to mark their
+   * length */
+  parse->nal_length_size = (data[4] & 0x03) + 1;
+  GST_DEBUG_OBJECT (parse, "nal length size %u", parse->nal_length_size);
+
+  num_sps = data[5] & 0x1f;
+  off = 6;
+  for (i = 0; i < num_sps; i++) {
+    parseres = gst_h264_parser_identify_nalu_avc (parse->nalparser,
+        data, off, size, 2, &nalu);
+    if (parseres != GST_H264_PARSER_OK) {
+      goto avcc_too_small;
+    }
+
+    gst_h264_parse_process_nal (parse, &nalu);
+    off = nalu.offset + nalu.size;
+  }
+
+  if (off >= size) {
+    goto avcc_too_small;
+  }
+  num_pps = data[off];
+  off++;
+
+  for (i = 0; i < num_pps; i++) {
+    parseres = gst_h264_parser_identify_nalu_avc (parse->nalparser,
+        data, off, size, 2, &nalu);
+    if (parseres != GST_H264_PARSER_OK) {
+      goto avcc_too_small;
+    }
+
+    gst_h264_parse_process_nal (parse, &nalu);
+    off = nalu.offset + nalu.size;
+  }
+
+  return TRUE;
+
+  /* ERRORS */
+avcc_too_small:
+  {
+    GST_DEBUG_OBJECT (parse, "avcC size %" G_GSIZE_FORMAT " < 8", size);
+    return FALSE;
+  }
+wrong_version:
+  {
+    GST_DEBUG_OBJECT (parse, "wrong avcC version");
+    return FALSE;
+  }
+}
+
+static gboolean
 gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
 {
   GstH264Parse *h264parse;
   GstStructure *str;
   const GValue *codec_data_value;
   GstBuffer *codec_data = NULL;
-  gsize size;
-  guint format, align, off;
-  GstH264NalUnit nalu;
-  GstH264ParserResult parseres;
+  guint format, align;
   GstCaps *old_caps;
   GstH264ParseClass *klass;
 
@@ -2803,48 +2951,17 @@ gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
 
   codec_data_value = gst_structure_get_value (str, "codec_data");
 
-  /* fix up caps without stream-format for max. backwards compatibility */
-  if (format == GST_H264_PARSE_FORMAT_NONE) {
-    /* codec_data implies avc */
-    if (codec_data_value != NULL) {
-      GST_ERROR ("video/x-h264 caps with codec_data but no stream-format=avc");
-      format = GST_H264_PARSE_FORMAT_AVC;
-    } else {
-      /* otherwise assume bytestream input */
-      GST_ERROR ("video/x-h264 caps without codec_data or stream-format");
-      format = GST_H264_PARSE_FORMAT_BYTE;
-    }
-  }
-
-  /* avc caps sanity checks */
-  if (format == GST_H264_PARSE_FORMAT_AVC) {
-    /* AVC requires codec_data, AVC3 might have one and/or SPS/PPS inline */
-    if (codec_data_value == NULL)
-      goto avc_caps_codec_data_missing;
-
-    /* AVC implies alignment=au, everything else is not allowed */
-    if (align == GST_H264_PARSE_ALIGN_NONE)
-      align = GST_H264_PARSE_ALIGN_AU;
-    else if (align != GST_H264_PARSE_ALIGN_AU)
-      goto avc_caps_wrong_alignment;
-  }
-
-  /* bytestream caps sanity checks */
-  if (format == GST_H264_PARSE_FORMAT_BYTE) {
-    /* should have SPS/PSS in-band (and/or oob in streamheader field) */
-    if (codec_data_value != NULL)
-      goto bytestream_caps_with_codec_data;
+  if (klass->fixate_format) {
+    if (!klass->fixate_format (h264parse, &format, &align, codec_data_value))
+      goto refuse_caps;
+  } else {
+    GST_FIXME_OBJECT (h264parse, "Implement fixate format");
   }
 
   /* packetized video has codec_data (required for AVC, optional for AVC3) */
   if (codec_data_value != NULL) {
     GstMapInfo map;
-    guint8 *data;
-    guint num_sps, num_pps;
-#ifndef GST_DISABLE_GST_DEBUG
-    guint profile;
-#endif
-    gint i;
+    gboolean ret;
 
     GST_DEBUG_OBJECT (h264parse, "have packetized h264");
     /* make note for optional split processing */
@@ -2857,69 +2974,13 @@ gst_h264_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
     codec_data = gst_value_get_buffer (codec_data_value);
     if (!codec_data)
       goto avc_caps_codec_data_missing;
+
     gst_buffer_map (codec_data, &map, GST_MAP_READ);
-    data = map.data;
-    size = map.size;
-
-    /* parse the avcC data */
-    if (size < 7) {             /* when numSPS==0 and numPPS==0, length is 7 bytes */
-      gst_buffer_unmap (codec_data, &map);
-      goto avcc_too_small;
-    }
-    /* parse the version, this must be 1 */
-    if (data[0] != 1) {
-      gst_buffer_unmap (codec_data, &map);
-      goto wrong_version;
-    }
-#ifndef GST_DISABLE_GST_DEBUG
-    /* AVCProfileIndication */
-    /* profile_compat */
-    /* AVCLevelIndication */
-    profile = (data[1] << 16) | (data[2] << 8) | data[3];
-    GST_DEBUG_OBJECT (h264parse, "profile %06x", profile);
-#endif
-
-    /* 6 bits reserved | 2 bits lengthSizeMinusOne */
-    /* this is the number of bytes in front of the NAL units to mark their
-     * length */
-    h264parse->nal_length_size = (data[4] & 0x03) + 1;
-    GST_DEBUG_OBJECT (h264parse, "nal length size %u",
-        h264parse->nal_length_size);
-
-    num_sps = data[5] & 0x1f;
-    off = 6;
-    for (i = 0; i < num_sps; i++) {
-      parseres = gst_h264_parser_identify_nalu_avc (h264parse->nalparser,
-          data, off, size, 2, &nalu);
-      if (parseres != GST_H264_PARSER_OK) {
-        gst_buffer_unmap (codec_data, &map);
-        goto avcc_too_small;
-      }
-
-      gst_h264_parse_process_nal (h264parse, &nalu);
-      off = nalu.offset + nalu.size;
-    }
-
-    if (off >= size) {
-      gst_buffer_unmap (codec_data, &map);
-      goto avcc_too_small;
-    }
-    num_pps = data[off];
-    off++;
-
-    for (i = 0; i < num_pps; i++) {
-      parseres = gst_h264_parser_identify_nalu_avc (h264parse->nalparser,
-          data, off, size, 2, &nalu);
-      if (parseres != GST_H264_PARSER_OK) {
-        gst_buffer_unmap (codec_data, &map);
-        goto avcc_too_small;
-      }
-
-      gst_h264_parse_process_nal (h264parse, &nalu);
-      off = nalu.offset + nalu.size;
-    }
-
+    ret = klass->handle_codec_data (h264parse, &map);
     gst_buffer_unmap (codec_data, &map);
+
+    if (!ret)
+      goto refuse_caps;
 
     gst_buffer_replace (&h264parse->codec_data_in, codec_data);
   } else if (format == GST_H264_PARSE_FORMAT_BYTE) {
@@ -2977,27 +3038,6 @@ avc_caps_codec_data_wrong_type:
 avc_caps_codec_data_missing:
   {
     GST_WARNING_OBJECT (parse, "H.264 AVC caps, but no codec_data");
-    goto refuse_caps;
-  }
-avc_caps_wrong_alignment:
-  {
-    GST_WARNING_OBJECT (parse, "H.264 AVC caps with NAL alignment, must be AU");
-    goto refuse_caps;
-  }
-bytestream_caps_with_codec_data:
-  {
-    GST_WARNING_OBJECT (parse, "H.264 bytestream caps with codec_data is not "
-        "expected, send SPS/PPS in-band with data or in streamheader field");
-    goto refuse_caps;
-  }
-avcc_too_small:
-  {
-    GST_DEBUG_OBJECT (h264parse, "avcC size %" G_GSIZE_FORMAT " < 8", size);
-    goto refuse_caps;
-  }
-wrong_version:
-  {
-    GST_DEBUG_OBJECT (h264parse, "wrong avcC version");
     goto refuse_caps;
   }
 refuse_caps:

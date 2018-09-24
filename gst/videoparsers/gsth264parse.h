@@ -170,43 +170,53 @@ struct _GstH264ParseClass
 
   const gchar * (*format_to_string)   (GstH264Parse * parse,
                                        guint format);
+
   guint         (*format_from_string) (GstH264Parse * parse,
                                        const gchar * format);
+
   GstCaps *     (*get_default_caps)   (GstH264Parse * parse);
+
   gboolean      (*fixate_format)      (GstH264Parse * parse,
                                        guint * format,
                                        guint * align,
                                        const GValue *codec_data_value);
+
   gboolean      (*handle_codec_data)  (GstH264Parse * parse,
                                        GstMapInfo * map);
+
   void          (*get_timestamp)      (GstH264Parse * parse,
                                        GstClockTime * ts,
                                        GstClockTime * dur);
 
   gboolean      (*has_last_sps)       (GstH264Parse * parse);
+
   gboolean      (*fill_sps_info)      (GstH264Parse * parse,
                                        GstH264ParseSPSInfo * info);
-  gboolean (*fill_profile_tier_level) (GstH264Parse * parse,
-                                       GstH264ParseProfileTierLevel *ptl);
-  GstCaps * (*get_compatible_profile_caps_from_last_sps)
-                                      (GstH264Parse * parse);
-  GstBuffer * (*prepare_pre_push_frame) (GstH264Parse * parse,
-                                         GstBaseParseFrame * frame);
-  GstBuffer * (*make_codec_data)      (GstH264Parse * parse);
+
+  gboolean      (*fill_profile_tier_level) (GstH264Parse * parse,
+                                            GstH264ParseProfileTierLevel *ptl);
+
+  GstCaps *     (*get_compatible_profile_caps_from_last_sps)  (GstH264Parse * parse);
+
+  GstBuffer *   (*prepare_pre_push_frame)   (GstH264Parse * parse,
+                                             GstBaseParseFrame * frame);
+
+  GstBuffer *   (*make_codec_data)          (GstH264Parse * parse);
+
   GstFlowReturn (*handle_frame_packetized)  (GstH264Parse * parse,
                                              GstBaseParseFrame * frame);
-  GstH264ParseHandleFrameReturn (*handle_frame_check_initial_skip)
-                                            (GstH264Parse * parse,
-                                             gint * skipsize,
-                                             gint * dropsize,
-                                             GstMapInfo * map);
-  GstH264ParseHandleFrameReturn (*handle_frame_bytestream)
-                                            (GstH264Parse * parse,
-                                             gint * skipsize,
-                                             gint * framesize,
-                                             gint * current_off,
-                                             GstMapInfo * map,
-                                             gboolean drain);
+
+  GstH264ParseHandleFrameReturn   (*handle_frame_check_initial_skip)  (GstH264Parse * parse,
+                                                                       gint * skipsize,
+                                                                       gint * dropsize,
+                                                                       GstMapInfo * map);
+
+  GstH264ParseHandleFrameReturn   (*handle_frame_bytestream)          (GstH264Parse * parse,
+                                                                       gint * skipsize,
+                                                                       gint * framesize,
+                                                                       gint * current_off,
+                                                                       GstMapInfo * map,
+                                                                       gboolean drain);
 };
 
 G_END_DECLS

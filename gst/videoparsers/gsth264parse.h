@@ -179,6 +179,9 @@ struct _GstH264ParseClass
                                        const GValue *codec_data_value);
   gboolean      (*handle_codec_data)  (GstH264Parse * parse,
                                        GstMapInfo * map);
+  void          (*get_timestamp)      (GstH264Parse * parse,
+                                       GstClockTime * ts,
+                                       GstClockTime * dur);
 
   gboolean      (*has_last_sps)       (GstH264Parse * parse);
   gboolean      (*fill_sps_info)      (GstH264Parse * parse,

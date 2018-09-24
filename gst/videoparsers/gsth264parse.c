@@ -146,7 +146,9 @@ gst_h264_parse_fixate_format (GstH264Parse * parse, guint * format,
     guint * align, const GValue * codec_data_value);
 static gboolean
 gst_h264_parse_handle_codec_data (GstH264Parse * parse, GstMapInfo * map);
-
+static void
+gst_h264_parse_get_timestamp (GstH264Parse * h264parse,
+    GstClockTime * out_ts, GstClockTime * out_dur);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -204,6 +206,7 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   klass->fixate_format = GST_DEBUG_FUNCPTR (gst_h264_parse_fixate_format);
   klass->handle_codec_data =
       GST_DEBUG_FUNCPTR (gst_h264_parse_handle_codec_data);
+  klass->get_timestamp = GST_DEBUG_FUNCPTR (gst_h264_parse_get_timestamp);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -2220,7 +2223,7 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
 
 static void
 gst_h264_parse_get_timestamp (GstH264Parse * h264parse,
-    GstClockTime * out_ts, GstClockTime * out_dur, gboolean frame)
+    GstClockTime * out_ts, GstClockTime * out_dur)
 {
   GstH264SPS *sps = h264parse->nalparser->last_sps;
   GstClockTime upstream;
@@ -2233,7 +2236,7 @@ gst_h264_parse_get_timestamp (GstH264Parse * h264parse,
   GST_LOG_OBJECT (h264parse, "Upstream ts %" GST_TIME_FORMAT,
       GST_TIME_ARGS (upstream));
 
-  if (!frame) {
+  if (!h264parse->frame_start) {
     GST_LOG_OBJECT (h264parse, "no frame data ->  0 duration");
     *out_dur = 0;
     goto exit;
@@ -2358,18 +2361,19 @@ gst_h264_parse_parse_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   GstH264Parse *h264parse;
   GstBuffer *buffer;
   guint av;
+  GstH264ParseClass *klass;
 
   h264parse = GST_H264_PARSE (parse);
+  klass = GST_H264_PARSE_GET_CLASS (h264parse);
   buffer = frame->buffer;
 
   gst_h264_parse_update_src_caps (h264parse, NULL);
 
   /* don't mess with timestamps if provided by upstream,
    * particularly since our ts not that good they handle seeking etc */
-  if (h264parse->do_ts)
-    gst_h264_parse_get_timestamp (h264parse,
-        &GST_BUFFER_TIMESTAMP (buffer), &GST_BUFFER_DURATION (buffer),
-        h264parse->frame_start);
+  if (h264parse->do_ts && klass->get_timestamp)
+    klass->get_timestamp (h264parse,
+        &GST_BUFFER_TIMESTAMP (buffer), &GST_BUFFER_DURATION (buffer));
 
   if (h264parse->keyframe)
     GST_BUFFER_FLAG_UNSET (buffer, GST_BUFFER_FLAG_DELTA_UNIT);

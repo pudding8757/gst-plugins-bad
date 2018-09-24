@@ -131,6 +131,9 @@ static GstCaps
 static GstBuffer *gst_h264_parse_prepare_pre_push_frame (GstH264Parse * parse,
     GstBaseParseFrame * frame);
 static GstBuffer *gst_h264_parse_make_codec_data (GstH264Parse * parse);
+static GstFlowReturn
+gst_h264_parse_handle_frame_packetized (GstH264Parse * parse,
+    GstBaseParseFrame * frame);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -179,6 +182,8 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   klass->prepare_pre_push_frame =
       GST_DEBUG_FUNCPTR (gst_h264_parse_prepare_pre_push_frame);
   klass->make_codec_data = GST_DEBUG_FUNCPTR (gst_h264_parse_make_codec_data);
+  klass->handle_frame_packetized =
+      GST_DEBUG_FUNCPTR (gst_h264_parse_handle_frame_packetized);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -1019,45 +1024,45 @@ static guint8 au_delim[6] = {
 };
 
 static GstFlowReturn
-gst_h264_parse_handle_frame_packetized (GstBaseParse * parse,
+gst_h264_parse_handle_frame_packetized (GstH264Parse * parse,
     GstBaseParseFrame * frame)
 {
-  GstH264Parse *h264parse = GST_H264_PARSE (parse);
+  GstBaseParse *baseparse = GST_BASE_PARSE (parse);
   GstBuffer *buffer = frame->buffer;
   GstFlowReturn ret = GST_FLOW_OK;
   GstH264ParserResult parse_res;
   GstH264NalUnit nalu;
-  const guint nl = h264parse->nal_length_size;
+  const guint nl = parse->nal_length_size;
   GstMapInfo map;
   gint left;
 
   if (nl < 1 || nl > 4) {
-    GST_DEBUG_OBJECT (h264parse, "insufficient data to split input");
+    GST_DEBUG_OBJECT (parse, "insufficient data to split input");
     return GST_FLOW_NOT_NEGOTIATED;
   }
 
   /* need to save buffer from invalidation upon _finish_frame */
-  if (h264parse->split_packetized)
+  if (parse->split_packetized)
     buffer = gst_buffer_copy (frame->buffer);
 
   gst_buffer_map (buffer, &map, GST_MAP_READ);
 
   left = map.size;
 
-  GST_LOG_OBJECT (h264parse,
+  GST_LOG_OBJECT (parse,
       "processing packet buffer of size %" G_GSIZE_FORMAT, map.size);
 
-  parse_res = gst_h264_parser_identify_nalu_avc (h264parse->nalparser,
+  parse_res = gst_h264_parser_identify_nalu_avc (parse->nalparser,
       map.data, 0, map.size, nl, &nalu);
 
   while (parse_res == GST_H264_PARSER_OK) {
-    GST_DEBUG_OBJECT (h264parse, "AVC nal offset %d", nalu.offset + nalu.size);
+    GST_DEBUG_OBJECT (parse, "AVC nal offset %d", nalu.offset + nalu.size);
 
     /* either way, have a look at it */
-    gst_h264_parse_process_nal (h264parse, &nalu);
+    gst_h264_parse_process_nal (parse, &nalu);
 
     /* dispatch per NALU if needed */
-    if (h264parse->split_packetized) {
+    if (parse->split_packetized) {
       GstBaseParseFrame tmp_frame;
 
       gst_base_parse_frame_init (&tmp_frame);
@@ -1071,41 +1076,41 @@ gst_h264_parse_handle_frame_packetized (GstBaseParse * parse,
        * subsequent code only considers input buffer's metadata.
        * Real data is either taken from input by baseclass or
        * a replacement output buffer is provided anyway. */
-      gst_h264_parse_parse_frame (parse, &tmp_frame);
-      ret = gst_base_parse_finish_frame (parse, &tmp_frame, nl + nalu.size);
+      gst_h264_parse_parse_frame (baseparse, &tmp_frame);
+      ret = gst_base_parse_finish_frame (baseparse, &tmp_frame, nl + nalu.size);
       left -= nl + nalu.size;
     }
 
-    parse_res = gst_h264_parser_identify_nalu_avc (h264parse->nalparser,
+    parse_res = gst_h264_parser_identify_nalu_avc (parse->nalparser,
         map.data, nalu.offset + nalu.size, map.size, nl, &nalu);
   }
 
   gst_buffer_unmap (buffer, &map);
 
-  if (!h264parse->split_packetized) {
-    gst_h264_parse_parse_frame (parse, frame);
-    ret = gst_base_parse_finish_frame (parse, frame, map.size);
+  if (!parse->split_packetized) {
+    gst_h264_parse_parse_frame (baseparse, frame);
+    ret = gst_base_parse_finish_frame (baseparse, frame, map.size);
   } else {
     gst_buffer_unref (buffer);
     if (G_UNLIKELY (left)) {
       /* should not be happening for nice AVC */
       GST_WARNING_OBJECT (parse, "skipping leftover AVC data %d", left);
       frame->flags |= GST_BASE_PARSE_FRAME_FLAG_DROP;
-      ret = gst_base_parse_finish_frame (parse, frame, map.size);
+      ret = gst_base_parse_finish_frame (baseparse, frame, map.size);
     }
   }
 
   if (parse_res == GST_H264_PARSER_NO_NAL_END ||
       parse_res == GST_H264_PARSER_BROKEN_DATA) {
 
-    if (h264parse->split_packetized) {
-      GST_ELEMENT_ERROR (h264parse, STREAM, FAILED, (NULL),
+    if (parse->split_packetized) {
+      GST_ELEMENT_ERROR (parse, STREAM, FAILED, (NULL),
           ("invalid AVC input data"));
 
       return GST_FLOW_ERROR;
     } else {
       /* do not meddle to much in this case */
-      GST_DEBUG_OBJECT (h264parse, "parsing packet failed");
+      GST_DEBUG_OBJECT (parse, "parsing packet failed");
     }
   }
 
@@ -1117,6 +1122,7 @@ gst_h264_parse_handle_frame (GstBaseParse * parse,
     GstBaseParseFrame * frame, gint * skipsize)
 {
   GstH264Parse *h264parse = GST_H264_PARSE (parse);
+  GstH264ParseClass *klass = GST_H264_PARSE_GET_CLASS (h264parse);
   GstBuffer *buffer = frame->buffer;
   GstMapInfo map;
   guint8 *data;
@@ -1137,7 +1143,7 @@ gst_h264_parse_handle_frame (GstBaseParse * parse,
 
   /* delegate in packetized case, no skipping should be needed */
   if (h264parse->packetized)
-    return gst_h264_parse_handle_frame_packetized (parse, frame);
+    return klass->handle_frame_packetized (h264parse, frame);
 
   gst_buffer_map (buffer, &map, GST_MAP_READ);
   data = map.data;

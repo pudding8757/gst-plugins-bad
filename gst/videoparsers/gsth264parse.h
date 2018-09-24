@@ -175,6 +175,8 @@ struct _GstH264ParseClass
   GstBuffer * (*prepare_pre_push_frame) (GstH264Parse * parse,
                                          GstBaseParseFrame * frame);
   GstBuffer * (*make_codec_data)      (GstH264Parse * parse);
+  GstFlowReturn (*handle_frame_packetized)  (GstH264Parse * parse,
+                                             GstBaseParseFrame * frame);
 };
 
 G_END_DECLS

@@ -788,6 +788,112 @@ gst_h264_parse_process_sei (GstH264Parse * h264parse, GstH264NalUnit * nalu)
   g_array_free (messages, TRUE);
 }
 
+static void
+gst_h264_parse_sps_parsed (GstH264Parse * h264parse)
+{
+  GST_DEBUG_OBJECT (h264parse, "SPS parsed, triggering src caps check");
+  h264parse->update_caps = TRUE;
+  h264parse->have_sps = TRUE;
+  if (h264parse->push_codec && h264parse->have_pps) {
+    /* SPS and PPS found in stream before the first pre_push_frame, no need
+     * to forcibly push at start */
+    GST_INFO_OBJECT (h264parse, "have SPS/PPS in stream");
+    h264parse->push_codec = FALSE;
+    h264parse->have_sps = FALSE;
+    h264parse->have_pps = FALSE;
+  }
+
+  h264parse->state |= GST_H264_PARSE_STATE_GOT_SPS;
+  h264parse->header |= TRUE;
+}
+
+static void
+gst_h264_parse_pps_parsed (GstH264Parse * h264parse)
+{
+  /* parameters might have changed, force caps check */
+  if (!h264parse->have_pps) {
+    GST_DEBUG_OBJECT (h264parse, "PPS parsed, triggering src caps check");
+    h264parse->update_caps = TRUE;
+  }
+  h264parse->have_pps = TRUE;
+  if (h264parse->push_codec && h264parse->have_sps) {
+    /* SPS and PPS found in stream before the first pre_push_frame, no need
+     * to forcibly push at start */
+    GST_INFO_OBJECT (h264parse, "have SPS/PPS in stream");
+    h264parse->push_codec = FALSE;
+    h264parse->have_sps = FALSE;
+    h264parse->have_pps = FALSE;
+  }
+
+  h264parse->state |= GST_H264_PARSE_STATE_GOT_PPS;
+  h264parse->header |= TRUE;
+}
+
+static void
+gst_h264_parse_sei_parsed (GstH264Parse * h264parse, guint nalu_offset)
+{
+  h264parse->header |= TRUE;
+
+  /* mark SEI pos */
+  if (h264parse->sei_pos == -1) {
+    if (h264parse->transform)
+      h264parse->sei_pos = gst_adapter_available (h264parse->frame_out);
+    else
+      h264parse->sei_pos = nalu_offset;
+    GST_DEBUG_OBJECT (h264parse, "marking SEI in frame at offset %d",
+        h264parse->sei_pos);
+  }
+}
+
+static void
+gst_h264_parse_frame_started (GstH264Parse * h264parse)
+{
+  GST_DEBUG_OBJECT (h264parse, "frame start");
+  h264parse->frame_start = TRUE;
+}
+
+static void
+gst_h264_parse_slice_hdr_parsed (GstH264Parse * h264parse, gboolean keyframe)
+{
+  if (keyframe)
+    h264parse->keyframe |= TRUE;
+  h264parse->state |= GST_H264_PARSE_STATE_GOT_SLICE;
+}
+
+static void
+gst_h264_parse_update_idr_pos (GstH264Parse * h264parse, guint nalu_offset)
+{
+  if (h264parse->idr_pos == -1) {
+    if (h264parse->transform)
+      h264parse->idr_pos = gst_adapter_available (h264parse->frame_out);
+    else
+      h264parse->idr_pos = nalu_offset;
+    GST_DEBUG_OBJECT (h264parse, "marking IDR in frame at offset %d",
+        h264parse->idr_pos);
+  }
+  /* if SEI preceeds (faked) IDR, then we have to insert config there */
+  if (h264parse->sei_pos >= 0 && h264parse->idr_pos > h264parse->sei_pos) {
+    h264parse->idr_pos = h264parse->sei_pos;
+    GST_DEBUG_OBJECT (h264parse, "moved IDR mark to SEI position %d",
+        h264parse->idr_pos);
+  }
+}
+
+static void
+gst_h264_pares_finish_process_nal (GstH264Parse * h264parse, guint8 * data,
+    guint size)
+{
+  /* if AVC output needed, collect properly prefixed nal in adapter,
+   * and use that to replace outgoing buffer data later on */
+  if (h264parse->transform) {
+    GstBuffer *buf;
+
+    GST_LOG_OBJECT (h264parse, "collecting NAL in AVC frame");
+    buf = gst_h264_parse_wrap_nal (h264parse, h264parse->format, data, size);
+    gst_adapter_push (h264parse->frame_out, buf);
+  }
+}
+
 /* caller guarantees 2 bytes of nal payload */
 static gboolean
 gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
@@ -829,22 +935,9 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
         return FALSE;
       }
 
-      GST_DEBUG_OBJECT (h264parse, "triggering src caps check");
-      h264parse->update_caps = TRUE;
-      h264parse->have_sps = TRUE;
-      if (h264parse->push_codec && h264parse->have_pps) {
-        /* SPS and PPS found in stream before the first pre_push_frame, no need
-         * to forcibly push at start */
-        GST_INFO_OBJECT (h264parse, "have SPS/PPS in stream");
-        h264parse->push_codec = FALSE;
-        h264parse->have_sps = FALSE;
-        h264parse->have_pps = FALSE;
-      }
-
       gst_h264_parser_store_nal (h264parse, sps.id, nal_type, nalu);
       gst_h264_sps_clear (&sps);
-      h264parse->state |= GST_H264_PARSE_STATE_GOT_SPS;
-      h264parse->header |= TRUE;
+      gst_h264_parse_sps_parsed (h264parse);
       break;
     case GST_H264_NAL_PPS:
       /* expected state: got-sps */
@@ -860,44 +953,18 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
           return FALSE;
       }
 
-      /* parameters might have changed, force caps check */
-      if (!h264parse->have_pps) {
-        GST_DEBUG_OBJECT (h264parse, "triggering src caps check");
-        h264parse->update_caps = TRUE;
-      }
-      h264parse->have_pps = TRUE;
-      if (h264parse->push_codec && h264parse->have_sps) {
-        /* SPS and PPS found in stream before the first pre_push_frame, no need
-         * to forcibly push at start */
-        GST_INFO_OBJECT (h264parse, "have SPS/PPS in stream");
-        h264parse->push_codec = FALSE;
-        h264parse->have_sps = FALSE;
-        h264parse->have_pps = FALSE;
-      }
-
       gst_h264_parser_store_nal (h264parse, pps.id, nal_type, nalu);
       gst_h264_pps_clear (&pps);
-      h264parse->state |= GST_H264_PARSE_STATE_GOT_PPS;
-      h264parse->header |= TRUE;
+      gst_h264_parse_pps_parsed (h264parse);
       break;
     case GST_H264_NAL_SEI:
       /* expected state: got-sps */
       if (!GST_H264_PARSE_STATE_VALID (h264parse, GST_H264_PARSE_STATE_GOT_SPS))
         return FALSE;
 
-      h264parse->header |= TRUE;
       gst_h264_parse_process_sei (h264parse, nalu);
-      /* mark SEI pos */
-      if (h264parse->sei_pos == -1) {
-        if (h264parse->transform)
-          h264parse->sei_pos = gst_adapter_available (h264parse->frame_out);
-        else
-          h264parse->sei_pos = nalu->sc_offset;
-        GST_DEBUG_OBJECT (h264parse, "marking SEI in frame at offset %d",
-            h264parse->sei_pos);
-      }
+      gst_h264_parse_sei_parsed (h264parse, nalu->sc_offset);
       break;
-
     case GST_H264_NAL_SLICE:
     case GST_H264_NAL_SLICE_DPA:
     case GST_H264_NAL_SLICE_DPB:
@@ -915,9 +982,8 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
         /* means first_mb_in_slice == 0 */
         /* real frame data */
         GST_DEBUG_OBJECT (h264parse, "first_mb_in_slice = 0");
-        h264parse->frame_start = TRUE;
+        gst_h264_parse_frame_started (h264parse);
       }
-      GST_DEBUG_OBJECT (h264parse, "frame start: %i", h264parse->frame_start);
       if (nal_type == GST_H264_NAL_SLICE_EXT && !GST_H264_IS_MVC_NALU (nalu))
         break;
       {
@@ -929,10 +995,12 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
             "parse result %d, first MB: %u, slice type: %u",
             pres, slice.first_mb_in_slice, slice.type);
         if (pres == GST_H264_PARSER_OK) {
-          if (GST_H264_IS_I_SLICE (&slice) || GST_H264_IS_SI_SLICE (&slice))
-            h264parse->keyframe |= TRUE;
+          gboolean keyframe = FALSE;
 
-          h264parse->state |= GST_H264_PARSE_STATE_GOT_SLICE;
+          if (GST_H264_IS_I_SLICE (&slice) || GST_H264_IS_SI_SLICE (&slice))
+            keyframe = TRUE;
+
+          gst_h264_parse_slice_hdr_parsed (h264parse, keyframe);
           h264parse->field_pic_flag = slice.field_pic_flag;
         }
       }
@@ -944,20 +1012,7 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
        * (which should be at start anyway) */
       /* mark where config needs to go if interval expired */
       /* mind replacement buffer if applicable */
-      if (h264parse->idr_pos == -1) {
-        if (h264parse->transform)
-          h264parse->idr_pos = gst_adapter_available (h264parse->frame_out);
-        else
-          h264parse->idr_pos = nalu->sc_offset;
-        GST_DEBUG_OBJECT (h264parse, "marking IDR in frame at offset %d",
-            h264parse->idr_pos);
-      }
-      /* if SEI preceeds (faked) IDR, then we have to insert config there */
-      if (h264parse->sei_pos >= 0 && h264parse->idr_pos > h264parse->sei_pos) {
-        h264parse->idr_pos = h264parse->sei_pos;
-        GST_DEBUG_OBJECT (h264parse, "moved IDR mark to SEI position %d",
-            h264parse->idr_pos);
-      }
+      gst_h264_parse_update_idr_pos (h264parse, nalu->sc_offset);
       break;
     case GST_H264_NAL_AU_DELIMITER:
       /* Just accumulate AU Delimiter, whether it's before SPS or not */
@@ -977,16 +1032,9 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
       break;
   }
 
-  /* if AVC output needed, collect properly prefixed nal in adapter,
-   * and use that to replace outgoing buffer data later on */
-  if (h264parse->transform) {
-    GstBuffer *buf;
+  gst_h264_pares_finish_process_nal (h264parse,
+      nalu->data + nalu->offset, nalu->size);
 
-    GST_LOG_OBJECT (h264parse, "collecting NAL in AVC frame");
-    buf = gst_h264_parse_wrap_nal (h264parse, h264parse->format,
-        nalu->data + nalu->offset, nalu->size);
-    gst_adapter_push (h264parse->frame_out, buf);
-  }
   return TRUE;
 }
 

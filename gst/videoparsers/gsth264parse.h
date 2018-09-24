@@ -47,8 +47,31 @@ G_BEGIN_DECLS
 
 GType gst_h264_parse_get_type (void);
 
+typedef struct _GstH264ParseSPSInfo GstH264ParseSPSInfo;
+typedef struct _GstH264ParseProfileTierLevel GstH264ParseProfileTierLevel;
 typedef struct _GstH264Parse GstH264Parse;
 typedef struct _GstH264ParseClass GstH264ParseClass;
+
+struct _GstH264ParseSPSInfo
+{
+  guint width;
+  guint height;
+  gint fps_num;
+  gint fps_den;
+  gint par_num;
+  gint par_den;
+  GstVideoInterlaceMode interlace_mode;
+  const gchar * chroma_format;
+  guint bit_depth_luma;
+  guint bit_depth_chroma;
+};
+
+struct _GstH264ParseProfileTierLevel
+{
+  const gchar * profile;
+  const gchar * tier;
+  const gchar * level;
+};
 
 struct _GstH264Parse
 {
@@ -141,6 +164,15 @@ struct _GstH264ParseClass
   guint         (*format_from_string) (GstH264Parse * parse,
                                        const gchar * format);
   GstCaps *     (*get_default_caps)   (GstH264Parse * parse);
+
+  gboolean      (*has_last_sps)       (GstH264Parse * parse);
+  gboolean      (*fill_sps_info)      (GstH264Parse * parse,
+                                       GstH264ParseSPSInfo * info);
+  gboolean (*fill_profile_tier_level) (GstH264Parse * parse,
+                                       GstH264ParseProfileTierLevel *ptl);
+  GstCaps * (*get_compatible_profile_caps_from_last_sps)
+                                      (GstH264Parse * parse);
+
 };
 
 G_END_DECLS

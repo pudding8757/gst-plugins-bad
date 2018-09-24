@@ -120,6 +120,14 @@ static const gchar *gst_h264_parse_format_to_string (GstH264Parse * parse,
 static guint gst_h264_parse_format_from_string (GstH264Parse * parse,
     const gchar * format);
 static GstCaps *gst_h264_parse_get_default_caps (GstH264Parse * parse);
+static gboolean gst_h264_parse_has_last_sps (GstH264Parse * parse);
+static gboolean gst_h264_parse_fill_sps_info (GstH264Parse * parse,
+    GstH264ParseSPSInfo * info);
+static gboolean gst_h264_parse_fill_profile_tier_level (GstH264Parse * parse,
+    GstH264ParseProfileTierLevel * ptl);
+static GstCaps
+    * gst_h264_parse_get_compatible_profile_caps_from_last_sps (GstH264Parse *
+    parse);
 
 static void
 gst_h264_parse_class_init (GstH264ParseClass * klass)
@@ -158,6 +166,13 @@ gst_h264_parse_class_init (GstH264ParseClass * klass)
   klass->format_from_string =
       GST_DEBUG_FUNCPTR (gst_h264_parse_format_from_string);
   klass->get_default_caps = GST_DEBUG_FUNCPTR (gst_h264_parse_get_default_caps);
+  klass->has_last_sps = GST_DEBUG_FUNCPTR (gst_h264_parse_has_last_sps);
+  klass->fill_sps_info = GST_DEBUG_FUNCPTR (gst_h264_parse_fill_sps_info);
+  klass->fill_profile_tier_level =
+      GST_DEBUG_FUNCPTR (gst_h264_parse_fill_profile_tier_level);
+  klass->get_compatible_profile_caps_from_last_sps =
+      GST_DEBUG_FUNCPTR
+      (gst_h264_parse_get_compatible_profile_caps_from_last_sps);
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
@@ -1453,13 +1468,19 @@ gst_h264_parse_get_par (GstH264Parse * h264parse, gint * num, gint * den)
 }
 
 static GstCaps *
-get_compatible_profile_caps (GstH264SPS * sps)
+gst_h264_parse_get_compatible_profile_caps_from_last_sps (GstH264Parse * parse)
 {
   GstCaps *caps = NULL;
   const gchar **profiles = NULL;
   gint i;
+  GstH264SPS *sps;
   GValue compat_profiles = G_VALUE_INIT;
   g_value_init (&compat_profiles, GST_TYPE_LIST);
+
+  sps = parse->nalparser->last_sps;
+
+  if (G_UNLIKELY (!sps))
+    return NULL;
 
   switch (sps->profile_idc) {
     case GST_H264_PROFILE_EXTENDED:
@@ -1589,7 +1610,7 @@ get_compatible_profile_caps (GstH264SPS * sps)
 /* if downstream didn't support the exact profile indicated in sps header,
  * check for the compatible profiles also */
 static void
-ensure_caps_profile (GstH264Parse * h264parse, GstCaps * caps, GstH264SPS * sps)
+ensure_caps_profile (GstH264Parse * h264parse, GstCaps * caps)
 {
   GstCaps *peer_caps, *compat_caps;
   GstH264ParseClass *klass = GST_H264_PARSE_GET_CLASS (h264parse);
@@ -1610,7 +1631,7 @@ ensure_caps_profile (GstH264Parse * h264parse, GstCaps * caps, GstH264SPS * sps)
   if (peer_caps && !gst_caps_can_intersect (caps, peer_caps)) {
     GstStructure *structure;
 
-    compat_caps = get_compatible_profile_caps (sps);
+    compat_caps = klass->get_compatible_profile_caps_from_last_sps (h264parse);
     if (compat_caps != NULL) {
       GstCaps *res_caps = NULL;
 
@@ -1768,15 +1789,106 @@ get_level_string (GstH264SPS * sps)
   }
 }
 
+static gboolean
+gst_h264_parse_has_last_sps (GstH264Parse * parse)
+{
+  return (parse->nalparser->last_sps != NULL) ? TRUE : FALSE;
+}
+
+static gboolean
+gst_h264_parse_fill_sps_info (GstH264Parse * parse, GstH264ParseSPSInfo * info)
+{
+  GstH264SPS *sps;
+  gint fps_num, fps_den;
+
+  g_return_val_if_fail (parse->nalparser != NULL, FALSE);
+
+  sps = parse->nalparser->last_sps;
+
+  if (G_UNLIKELY (!sps))
+    return FALSE;
+
+  if (sps->frame_cropping_flag) {
+    info->width = sps->crop_rect_width;
+    info->height = sps->crop_rect_height;
+  } else {
+    info->width = sps->width;
+    info->height = sps->height;
+  }
+
+  /* 0/1 is set as the default in the codec parser, we will set
+   * it in case we have no info */
+  gst_h264_video_calculate_framerate (sps, parse->field_pic_flag,
+      parse->sei_pic_struct, &fps_num, &fps_den);
+
+  info->fps_num = fps_num;
+  info->fps_den = fps_den;
+
+  if (sps->vui_parameters.aspect_ratio_info_present_flag) {
+    info->par_num = sps->vui_parameters.par_n;
+    info->par_den = sps->vui_parameters.par_d;
+  }
+
+  if (sps->frame_mbs_only_flag == 0)
+    info->interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
+  else
+    info->interlace_mode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
+
+  info->chroma_format = NULL;
+  info->bit_depth_chroma = sps->bit_depth_chroma_minus8 + 8;
+  info->bit_depth_luma = sps->bit_depth_luma_minus8 + 8;
+
+  switch (sps->chroma_format_idc) {
+    case 0:
+      info->chroma_format = "4:0:0";
+      info->bit_depth_chroma = 0;
+      break;
+    case 1:
+      info->chroma_format = "4:2:0";
+      break;
+    case 2:
+      info->chroma_format = "4:2:2";
+      break;
+    case 3:
+      info->chroma_format = "4:4:4";
+      break;
+    default:
+      break;
+  }
+
+  return TRUE;
+}
+
+static gboolean
+gst_h264_parse_fill_profile_tier_level (GstH264Parse * parse,
+    GstH264ParseProfileTierLevel * ptl)
+{
+  GstH264SPS *sps;
+
+  g_return_val_if_fail (parse->nalparser != NULL, FALSE);
+
+  sps = parse->nalparser->last_sps;
+
+  if (G_UNLIKELY (!sps))
+    return FALSE;
+
+  ptl->profile = get_profile_string (sps);
+  ptl->level = get_level_string (sps);
+  ptl->tier = NULL;
+
+  return TRUE;
+}
+
 static void
 gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
 {
-  GstH264SPS *sps;
   GstCaps *sink_caps, *src_caps;
   gboolean modified = FALSE;
   GstBuffer *buf = NULL;
   GstStructure *s = NULL;
   GstH264ParseClass *klass;
+  gboolean has_sps;
+  GstH264ParseSPSInfo info = { 0 };
 
   if (G_UNLIKELY (!gst_pad_has_current_caps (GST_BASE_PARSE_SRC_PAD
               (h264parse))))
@@ -1799,8 +1911,8 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
   else
     s = gst_caps_get_structure (sink_caps, 0);
 
-  sps = h264parse->nalparser->last_sps;
-  GST_DEBUG_OBJECT (h264parse, "sps: %p", sps);
+  has_sps = klass->has_last_sps (h264parse);
+  GST_DEBUG_OBJECT (h264parse, "has sps: %d", has_sps);
 
   /* only codec-data for nice-and-clean au aligned packetized avc format */
   if ((h264parse->format == GST_H264_PARSE_FORMAT_AVC
@@ -1824,62 +1936,47 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
   }
 
   caps = NULL;
-  if (G_UNLIKELY (!sps)) {
+  if (G_UNLIKELY (!has_sps)) {
     caps = gst_caps_copy (sink_caps);
   } else {
-    gint crop_width, crop_height;
-    gint fps_num, fps_den;
-    gint par_n, par_d;
+    klass->fill_sps_info (h264parse, &info);
 
-    if (sps->frame_cropping_flag) {
-      crop_width = sps->crop_rect_width;
-      crop_height = sps->crop_rect_height;
-    } else {
-      crop_width = sps->width;
-      crop_height = sps->height;
-    }
-
-    if (G_UNLIKELY (h264parse->width != crop_width ||
-            h264parse->height != crop_height)) {
+    if (G_UNLIKELY (h264parse->width != info.width ||
+            h264parse->height != info.height)) {
       GST_INFO_OBJECT (h264parse, "resolution changed %dx%d",
-          crop_width, crop_height);
-      h264parse->width = crop_width;
-      h264parse->height = crop_height;
+          info.width, info.height);
+      h264parse->width = info.width;
+      h264parse->height = info.height;
       modified = TRUE;
     }
 
-    /* 0/1 is set as the default in the codec parser, we will set
-     * it in case we have no info */
-    gst_h264_video_calculate_framerate (sps, h264parse->field_pic_flag,
-        h264parse->sei_pic_struct, &fps_num, &fps_den);
-    if (G_UNLIKELY (h264parse->fps_num != fps_num
-            || h264parse->fps_den != fps_den)) {
-      GST_DEBUG_OBJECT (h264parse, "framerate changed %d/%d", fps_num, fps_den);
-      h264parse->fps_num = fps_num;
-      h264parse->fps_den = fps_den;
+    if (G_UNLIKELY (h264parse->fps_num != info.fps_num
+            || h264parse->fps_den != info.fps_den)) {
+      GST_DEBUG_OBJECT (h264parse,
+          "framerate changed %d/%d", info.fps_num, info.fps_den);
+      h264parse->fps_num = info.fps_num;
+      h264parse->fps_den = info.fps_den;
       modified = TRUE;
     }
 
-    if (sps->vui_parameters.aspect_ratio_info_present_flag) {
-      if (G_UNLIKELY ((h264parse->parsed_par_n != sps->vui_parameters.par_n)
-              || (h264parse->parsed_par_d != sps->vui_parameters.par_d))) {
-        h264parse->parsed_par_n = sps->vui_parameters.par_n;
-        h264parse->parsed_par_d = sps->vui_parameters.par_d;
+    if (info.par_num > 0 && info.par_den > 0) {
+      if (G_UNLIKELY ((h264parse->parsed_par_n != info.par_num)
+              || (h264parse->parsed_par_d != info.par_den))) {
+        h264parse->parsed_par_n = info.par_num;
+        h264parse->parsed_par_d = info.par_den;
         GST_INFO_OBJECT (h264parse, "pixel aspect ratio has been changed %d/%d",
             h264parse->parsed_par_n, h264parse->parsed_par_d);
       }
     }
 
     if (G_UNLIKELY (modified || h264parse->update_caps)) {
-      GstVideoInterlaceMode imode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
       gint width, height;
       GstClockTime latency;
-
+      gint fps_num, fps_den;
+      gint par_n, par_d;
       const gchar *caps_mview_mode = NULL;
       GstVideoMultiviewMode mview_mode = h264parse->multiview_mode;
       GstVideoMultiviewFlags mview_flags = h264parse->multiview_flags;
-      const gchar *chroma_format = NULL;
-      guint bit_depth_chroma;
 
       fps_num = h264parse->fps_num;
       fps_den = h264parse->fps_den;
@@ -1949,38 +2046,16 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
         }
 
       }
-      if (sps->frame_mbs_only_flag == 0)
-        imode = GST_VIDEO_INTERLACE_MODE_MIXED;
 
       if (s && !gst_structure_has_field (s, "interlace-mode"))
         gst_caps_set_simple (caps, "interlace-mode", G_TYPE_STRING,
-            gst_video_interlace_mode_to_string (imode), NULL);
+            gst_video_interlace_mode_to_string (info.interlace_mode), NULL);
 
-      bit_depth_chroma = sps->bit_depth_chroma_minus8 + 8;
-
-      switch (sps->chroma_format_idc) {
-        case 0:
-          chroma_format = "4:0:0";
-          bit_depth_chroma = 0;
-          break;
-        case 1:
-          chroma_format = "4:2:0";
-          break;
-        case 2:
-          chroma_format = "4:2:2";
-          break;
-        case 3:
-          chroma_format = "4:4:4";
-          break;
-        default:
-          break;
-      }
-
-      if (chroma_format)
+      if (info.chroma_format)
         gst_caps_set_simple (caps,
-            "chroma-format", G_TYPE_STRING, chroma_format,
-            "bit-depth-luma", G_TYPE_UINT, sps->bit_depth_luma_minus8 + 8,
-            "bit-depth-chroma", G_TYPE_UINT, bit_depth_chroma, NULL);
+            "chroma-format", G_TYPE_STRING, info.chroma_format,
+            "bit-depth-luma", G_TYPE_UINT, info.bit_depth_luma,
+            "bit-depth-chroma", G_TYPE_UINT, info.bit_depth_chroma, NULL);
     }
   }
 
@@ -1992,19 +2067,17 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
         gst_h264_parse_get_string (h264parse, FALSE, h264parse->align), NULL);
 
     /* set profile and level in caps */
-    if (sps) {
-      const gchar *profile, *level;
+    if (has_sps) {
+      GstH264ParseProfileTierLevel ptl = { 0 };
 
-      profile = get_profile_string (sps);
-      if (profile != NULL)
-        gst_caps_set_simple (caps, "profile", G_TYPE_STRING, profile, NULL);
+      if (ptl.profile != NULL)
+        gst_caps_set_simple (caps, "profile", G_TYPE_STRING, ptl.profile, NULL);
 
-      level = get_level_string (sps);
-      if (level != NULL)
-        gst_caps_set_simple (caps, "level", G_TYPE_STRING, level, NULL);
+      if (ptl.level != NULL)
+        gst_caps_set_simple (caps, "level", G_TYPE_STRING, ptl.level, NULL);
 
       /* relax the profile constraint to find a suitable decoder */
-      ensure_caps_profile (h264parse, caps, sps);
+      ensure_caps_profile (h264parse, caps);
     }
 
     src_caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (h264parse));

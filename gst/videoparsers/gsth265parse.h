@@ -24,6 +24,7 @@
 #include <gst/gst.h>
 #include <gst/base/gstbaseparse.h>
 #include <gst/codecparsers/gsth265parser.h>
+#include "gsth26xbaseparse.h"
 
 G_BEGIN_DECLS
 
@@ -45,65 +46,14 @@ typedef struct _GstH265ParseClass GstH265ParseClass;
 
 struct _GstH265Parse
 {
-  GstBaseParse baseparse;
+  GstH26XBaseParse baseparse;
 
-  /* stream */
-  gint width, height;
-  gint fps_num, fps_den;
-  gint upstream_par_n, upstream_par_d;
-  gint parsed_par_n, parsed_par_d;
-  /* current codec_data in output caps, if any */
-  GstBuffer *codec_data;
-  /* input codec_data, if any */
-  GstBuffer *codec_data_in;
-  guint nal_length_size;
-  gboolean packetized;
-  gboolean split_packetized;
-  gboolean transform;
-
-  /* state */
   GstH265Parser *nalparser;
-  guint state;
-  guint align;
-  guint format;
-  gint current_off;
-
-  GstClockTime last_report;
-  gboolean push_codec;
-  /* The following variables have a meaning in context of "have
-   * VPS/SPS/PPS to push downstream", e.g. to update caps */
-  gboolean have_vps;
-  gboolean have_sps;
-  gboolean have_pps;
-
-  /* collected SPS and PPS NALUs */
-  GstBuffer *vps_nals[GST_H265_MAX_VPS_COUNT];
-  GstBuffer *sps_nals[GST_H265_MAX_SPS_COUNT];
-  GstBuffer *pps_nals[GST_H265_MAX_PPS_COUNT];
-
-  gboolean discont;
-
-  /* frame parsing */
-  gint idr_pos, sei_pos;
-  gboolean update_caps;
-  GstAdapter *frame_out;
-  gboolean keyframe;
-  gboolean header;
-  /* AU state */
-  gboolean picture_start;
-
-  /* props */
-  gint interval;
-
-  gboolean sent_codec_tag;
-
-  GstClockTime pending_key_unit_ts;
-  GstEvent *force_key_unit_event;
 };
 
 struct _GstH265ParseClass
 {
-  GstBaseParseClass parent_class;
+  GstH26XBaseParseClass parent_class;
 };
 
 G_END_DECLS
